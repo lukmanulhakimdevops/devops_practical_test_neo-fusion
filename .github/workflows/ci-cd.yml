@@ -28,10 +28,16 @@ jobs:
       - name: Install compression tools
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Extract Source Code
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download source code from S3
         run: |
-          mkdir -p extracted_source
-          7z x "artifacts/sources/SOURCE_TodoWebAPI.7z" -oextracted_source
+          aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
+          7z x SOURCE_TodoWebAPI.7z -oextracted_source
 
       - name: Build and Publish
         working-directory: ./extracted_source
@@ -45,13 +51,7 @@ jobs:
           cd extracted_source/publish_output
           7z a ../../webapp-binaries.7z *
 
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload to S3
+      - name: Upload to S3 (overwrite latest)
         run: |
           aws s3 cp webapp-binaries.7z s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z
 
@@ -73,17 +73,14 @@ jobs:
               exit 1
             fi
             APP_DIR=$(dirname "$MAIN_DLL")
-            # Update appsettings.json with RDS endpoint from secret
-            if [ -n "${{ secrets.RDS_ENDPOINT }}" ]; then
-              RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
-              CONN_STRING="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
-              sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
-            fi
+            # Update connection string using secrets
+            RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
+            CONN_STRING="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
+            sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
             sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
 Description=DotNet Web API
 After=network.target
-
 [Service]
 WorkingDirectory=APP_DIR_PLACEHOLDER
 ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
@@ -91,7 +88,6 @@ Restart=always
 User=root
 StandardOutput=append:/var/log/webapp.log
 StandardError=append:/var/log/webapp.log
-
 [Install]
 WantedBy=multi-user.target
 SVC

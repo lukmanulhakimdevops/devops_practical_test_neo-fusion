@@ -183,7 +183,6 @@ resource "aws_iam_instance_profile" "ec2_profile" {
   role = aws_iam_role.ec2_s3_role.name
 }
 
-# CloudWatch policy attachment (free tier)
 resource "aws_iam_role_policy_attachment" "ec2_cw_policy" {
   role       = aws_iam_role.ec2_s3_role.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
@@ -259,7 +258,7 @@ sudo dpkg -i packages-microsoft-prod.deb
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get install -y dotnet-runtime-6.0
 
-# CloudWatch agent
+# Install CloudWatch Agent
 sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
 sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
 sudo rm -f amazon-cloudwatch-agent.deb
@@ -296,9 +295,8 @@ if [ -z "$MAIN_DLL" ]; then
     exit 1
 fi
 APP_DIR=$(dirname "$MAIN_DLL")
-echo "Main DLL: $MAIN_DLL"
+echo "Found main DLL: $MAIN_DLL"
 
-# Update appsettings.json with RDS endpoint
 RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
 RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
 CONN_STRING="Server=$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
@@ -423,7 +421,7 @@ resource "aws_db_instance" "mysql_db" {
   vpc_security_group_ids  = [aws_security_group.db_sg.id]
   db_subnet_group_name    = aws_db_subnet_group.db_subnet_group.name
   backup_retention_period = 7
-  tags = { Name = "devops-test-mysql" }
+  tags                    = { Name = "devops-test-mysql" }
 }
 
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {

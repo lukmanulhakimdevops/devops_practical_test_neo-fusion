@@ -2,8 +2,8 @@
 set -e
 
 echo "============================================="
-echo "Neo Fusion DevOps - Free Tier (Binary Direct)"
-echo "EC2 runs pre-built binary, GitHub Actions builds from source"
+echo "Neo Fusion DevOps - Full Free Tier Solution"
+echo "EC2 runs pre-built binary; CI/CD builds from source"
 echo "============================================="
 
 # ------------------------------
@@ -40,7 +40,7 @@ if [[ "$(basename "$PWD")" == "scripts" ]]; then cd ..; fi
 echo "[DIR] Working dir: $PWD"
 
 # ------------------------------
-# Git helpers
+# Git helpers (force push)
 # ------------------------------
 ensure_git_repo() {
     if [ ! -d ".git" ]; then
@@ -71,7 +71,7 @@ commit_and_push() {
     if git diff --cached --quiet; then
         echo "[GIT] No changes to commit."
     else
-        git commit -m "Update infra and workflows"
+        git commit -m "Update infrastructure and workflows"
         if ! git remote | grep -q origin; then
             git remote add origin "https://github.com/$REPO.git"
         fi
@@ -184,10 +184,16 @@ jobs:
       - name: Install compression tools
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Extract Source Code
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download source code from S3
         run: |
-          mkdir -p extracted_source
-          7z x "artifacts/sources/SOURCE_TodoWebAPI.7z" -oextracted_source
+          aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
+          7z x SOURCE_TodoWebAPI.7z -oextracted_source
 
       - name: Build and Publish
         working-directory: ./extracted_source
@@ -201,13 +207,7 @@ jobs:
           cd extracted_source/publish_output
           7z a ../../webapp-binaries.7z *
 
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload to S3
+      - name: Upload to S3 (overwrite latest)
         run: |
           aws s3 cp webapp-binaries.7z s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z
 
@@ -229,17 +229,14 @@ jobs:
               exit 1
             fi
             APP_DIR=$(dirname "$MAIN_DLL")
-            # Update appsettings.json with RDS endpoint from secret
-            if [ -n "${{ secrets.RDS_ENDPOINT }}" ]; then
-              RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
-              CONN_STRING="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
-              sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
-            fi
+            # Update connection string using secrets
+            RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
+            CONN_STRING="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
+            sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
             sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
 Description=DotNet Web API
 After=network.target
-
 [Service]
 WorkingDirectory=APP_DIR_PLACEHOLDER
 ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
@@ -247,7 +244,6 @@ Restart=always
 User=root
 StandardOutput=append:/var/log/webapp.log
 StandardError=append:/var/log/webapp.log
-
 [Install]
 WantedBy=multi-user.target
 SVC
@@ -259,11 +255,11 @@ SVC
             sleep 5
             sudo systemctl status webapp --no-pager
 EOF
-    echo "[OK] GitHub Actions workflow created (builds from source)."
+    echo "[OK] GitHub Actions workflow created."
 }
 
 create_deploy_script() {
-    # This script is for manual fallback, but EC2 user_data already includes everything.
+    # Optional fallback script, not used by default because user_data handles everything.
     mkdir -p scripts
     cat > scripts/deploy.sh << 'EOF'
 #!/bin/bash
@@ -284,11 +280,42 @@ sudo dpkg -i packages-microsoft-prod.deb
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get install -y dotnet-runtime-6.0
 
+# Install CloudWatch agent
+sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
+sudo rm -f amazon-cloudwatch-agent.deb
+
+sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json > /dev/null << 'CWEOF'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {"file_path": "/var/log/webapp.log", "log_group_name": "/aws/ec2/webapp", "log_stream_name": "{instance_id}", "retention_in_days": 7},
+          {"file_path": "/var/log/user-data.log", "log_group_name": "/aws/ec2/user-data", "log_stream_name": "{instance_id}", "retention_in_days": 7}
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "metrics_collected": {
+      "cpu": {"measurement": ["cpu_usage_idle", "cpu_usage_user"], "metrics_collection_interval": 60},
+      "mem": {"measurement": ["mem_used_percent"], "metrics_collection_interval": 60}
+    }
+  }
+}
+CWEOF
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
 BUCKET_NAME="BUCKET_PLACEHOLDER"
 aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
 sudo mkdir -p /var/www/webapp
 sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
 MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+if [ -z "$MAIN_DLL" ]; then
+    echo "ERROR: Main DLL not found"
+    exit 1
+fi
 APP_DIR=$(dirname "$MAIN_DLL")
 sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
@@ -502,7 +529,6 @@ resource "aws_iam_instance_profile" "ec2_profile" {
   role = aws_iam_role.ec2_s3_role.name
 }
 
-# CloudWatch policy attachment (free tier)
 resource "aws_iam_role_policy_attachment" "ec2_cw_policy" {
   role       = aws_iam_role.ec2_s3_role.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
@@ -578,7 +604,7 @@ sudo dpkg -i packages-microsoft-prod.deb
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get install -y dotnet-runtime-6.0
 
-# CloudWatch agent
+# Install CloudWatch Agent
 sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
 sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
 sudo rm -f amazon-cloudwatch-agent.deb
@@ -615,9 +641,8 @@ if [ -z "$MAIN_DLL" ]; then
     exit 1
 fi
 APP_DIR=$(dirname "$MAIN_DLL")
-echo "Main DLL: $MAIN_DLL"
+echo "Found main DLL: $MAIN_DLL"
 
-# Update appsettings.json with RDS endpoint
 RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
 RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
 CONN_STRING="Server=$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
@@ -742,7 +767,7 @@ resource "aws_db_instance" "mysql_db" {
   vpc_security_group_ids  = [aws_security_group.db_sg.id]
   db_subnet_group_name    = aws_db_subnet_group.db_subnet_group.name
   backup_retention_period = 7
-  tags = { Name = "devops-test-mysql" }
+  tags                    = { Name = "devops-test-mysql" }
 }
 
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
@@ -775,7 +800,7 @@ output "rds_endpoint" { value = aws_db_instance.mysql_db.endpoint }
 output "s3_bucket_name" { value = aws_s3_bucket.app_bucket.id }
 output "github_actions_role_arn" { value = aws_iam_role.github_actions_role.arn }
 EOF
-    echo "[OK] terraform/main.tf created (with CloudWatch)."
+    echo "[OK] terraform/main.tf created."
 }
 
 prepare_key_pair() {
@@ -809,12 +834,26 @@ run_terraform() {
 upload_artifacts() {
     S3_BUCKET=$(cat /tmp/s3_bucket.txt 2>/dev/null)
     [ -z "$S3_BUCKET" ] && return
-    echo "[S3] Uploading pre-built binary to s3://$S3_BUCKET..."
+    echo "[S3] Uploading artifacts to s3://$S3_BUCKET..."
+
+    # Upload pre-built binary (seed)
     if [ -f "artifacts/binaries/Binary-linux-x64.7z" ]; then
+        echo "[UPLOAD] Pre-built binary (seed)"
         aws s3 cp "artifacts/binaries/Binary-linux-x64.7z" "s3://$S3_BUCKET/artifacts/latest/webapp-binaries.7z"
     else
-        echo "[WARN] Binary not found, skipping."
+        echo "[WARN] No pre-built binary found."
     fi
+
+    # Upload source code (required for CI/CD)
+    if [ -f "artifacts/sources/SOURCE_TodoWebAPI.7z" ]; then
+        echo "[UPLOAD] Source code archive"
+        aws s3 cp "artifacts/sources/SOURCE_TodoWebAPI.7z" "s3://$S3_BUCKET/sources/SOURCE_TodoWebAPI.7z"
+    else
+        echo "[ERROR] Source code not found at artifacts/sources/SOURCE_TodoWebAPI.7z"
+        exit 1
+    fi
+
+    # Upload SQL
     [ -f "artifacts/sql/TodoItem_DDL.sql" ] && aws s3 cp artifacts/sql/TodoItem_DDL.sql s3://$S3_BUCKET/sql/
     echo "[OK] Artifacts uploaded."
 }
@@ -829,7 +868,7 @@ add_ssh_key_to_ec2() {
 }
 
 # ------------------------------
-# Main
+# Main Execution Flow
 # ------------------------------
 destroy_existing
 install_prereqs
@@ -852,6 +891,7 @@ echo "[DONE] Bootstrap complete."
 echo "EC2 Elastic IP: $(cat /tmp/ec2_ip.txt 2>/dev/null || echo 'unknown')"
 echo "S3 Bucket: $(cat /tmp/s3_bucket.txt 2>/dev/null || echo 'unknown')"
 echo ""
-echo "👉 EC2 will run the pre-built binary from artifacts/binaries/Binary-linux-x64.7z"
-echo "👉 GitHub Actions will build from source (SOURCE_TodoWebAPI.7z) on each push."
+echo "👉 EC2 will run the pre-built binary from S3."
+echo "👉 On each push, GitHub Actions will build from source (SOURCE_TodoWebAPI.7z) and update the binary."
+echo "👉 CloudWatch monitors EC2, RDS, and logs application output."
 echo "============================================="
