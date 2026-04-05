@@ -42,6 +42,9 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# -------------------------------------------------------
+# Networking
+# -------------------------------------------------------
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
@@ -85,6 +88,9 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# -------------------------------------------------------
+# Security Groups
+# -------------------------------------------------------
 resource "aws_security_group" "app_sg" {
   vpc_id = aws_vpc.main.id
   ingress {
@@ -131,6 +137,9 @@ resource "aws_security_group" "db_sg" {
   tags = { Name = "db-sg" }
 }
 
+# -------------------------------------------------------
+# S3 bucket
+# -------------------------------------------------------
 resource "aws_s3_bucket" "app_bucket" {
   bucket_prefix = "devops-test-bucket-"
   force_destroy = true
@@ -138,7 +147,7 @@ resource "aws_s3_bucket" "app_bucket" {
 }
 
 resource "aws_s3_bucket_public_access_block" "app_bucket_block" {
-  bucket = aws_s3_bucket.app_bucket.id
+  bucket                  = aws_s3_bucket.app_bucket.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -150,13 +159,16 @@ resource "aws_db_subnet_group" "db_subnet_group" {
   subnet_ids = [aws_subnet.private_1.id, aws_subnet.private_2.id]
 }
 
+# -------------------------------------------------------
+# IAM: EC2 role for S3 + CloudWatch
+# -------------------------------------------------------
 resource "aws_iam_role" "ec2_s3_role" {
   name_prefix = "ec2-s3-role-"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
@@ -164,7 +176,7 @@ resource "aws_iam_role" "ec2_s3_role" {
 
 resource "aws_iam_role_policy" "ec2_s3_policy" {
   name_prefix = "ec2-s3-policy-"
-  role = aws_iam_role.ec2_s3_role.id
+  role        = aws_iam_role.ec2_s3_role.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -178,11 +190,20 @@ resource "aws_iam_role_policy" "ec2_s3_policy" {
   })
 }
 
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name_prefix = "ec2-profile-"
-  role = aws_iam_role.ec2_s3_role.name
+# Attach CloudWatchAgentServerPolicy to same role for monitoring
+resource "aws_iam_role_policy_attachment" "ec2_cw_policy" {
+  role       = aws_iam_role.ec2_s3_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name_prefix = "ec2-profile-"
+  role        = aws_iam_role.ec2_s3_role.name
+}
+
+# -------------------------------------------------------
+# IAM: GitHub Actions OIDC role
+# -------------------------------------------------------
 resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
@@ -194,8 +215,8 @@ resource "aws_iam_role" "github_actions_role" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRoleWithWebIdentity"
-      Effect = "Allow"
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Effect    = "Allow"
       Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
       Condition = {
         StringLike = {
@@ -211,7 +232,7 @@ resource "aws_iam_role" "github_actions_role" {
 
 resource "aws_iam_role_policy" "github_actions_policy" {
   name_prefix = "github-actions-policy-"
-  role = aws_iam_role.github_actions_role.id
+  role        = aws_iam_role.github_actions_role.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -225,11 +246,17 @@ resource "aws_iam_role_policy" "github_actions_policy" {
   })
 }
 
+# -------------------------------------------------------
+# Elastic IP
+# -------------------------------------------------------
 resource "aws_eip" "web_eip" {
   domain = "vpc"
-  tags = { Name = "webapp-eip" }
+  tags   = { Name = "webapp-eip" }
 }
 
+# -------------------------------------------------------
+# EC2 user_data (includes CloudWatch agent)
+# -------------------------------------------------------
 locals {
   user_data = <<-USERDATA
 #!/bin/bash
@@ -251,6 +278,46 @@ sudo -E apt-get upgrade -y
 
 sudo -E apt-get install -y wget awscli mysql-client p7zip-full
 
+# Install CloudWatch Agent
+sudo wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+sudo dpkg -i -E amazon-cloudwatch-agent.deb
+sudo rm -f amazon-cloudwatch-agent.deb
+
+sudo mkdir -p /opt/aws/amazon-cloudwatch-agent/etc/
+sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json > /dev/null << 'CWEOF'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/webapp.log",
+            "log_group_name": "/aws/ec2/webapp",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 7
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "metrics_collected": {
+      "cpu": {
+        "measurement": ["cpu_usage_idle", "cpu_usage_iowait", "cpu_usage_user"],
+        "metrics_collection_interval": 60
+      },
+      "mem": {
+        "measurement": ["mem_used_percent"],
+        "metrics_collection_interval": 60
+      }
+    }
+  }
+}
+CWEOF
+
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+# Install .NET runtime
 wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb
 sudo dpkg -i packages-microsoft-prod.deb
 sudo -E apt-get update --fix-missing -y
@@ -270,6 +337,14 @@ if [ -z "$MAIN_DLL" ]; then
 fi
 APP_DIR=$(dirname "$MAIN_DLL")
 echo "Found main DLL: $MAIN_DLL"
+
+# Update connection string with RDS endpoint (Terraform interpolates)
+RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
+RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
+CONN_STRING="Server=$RDS_HOST;Database=todoapp;User=tempAdmin;Password=!tempAdmin954*"
+if [ -f "$APP_DIR/appsettings.json" ]; then
+    sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json"
+fi
 
 sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
@@ -309,6 +384,9 @@ echo "=== Bootstrap completed ==="
 USERDATA
 }
 
+# -------------------------------------------------------
+# Launch Template + ASG
+# -------------------------------------------------------
 resource "aws_launch_template" "web_lt" {
   name_prefix   = "web-lt-"
   image_id      = data.aws_ami.ubuntu.id
@@ -321,10 +399,10 @@ resource "aws_launch_template" "web_lt" {
 }
 
 resource "aws_autoscaling_group" "web_asg" {
-  name               = "web-asg"
-  min_size           = 1
-  max_size           = 1
-  desired_capacity   = 1
+  name                = "web-asg"
+  min_size            = 1
+  max_size            = 1
+  desired_capacity    = 1
   vpc_zone_identifier = [aws_subnet.public.id]
   launch_template {
     id      = aws_launch_template.web_lt.id
@@ -349,8 +427,11 @@ resource "aws_eip_association" "web_eip_assoc" {
   allocation_id = aws_eip.web_eip.id
 }
 
+# -------------------------------------------------------
+# CloudFront CDN
+# -------------------------------------------------------
 resource "aws_cloudfront_distribution" "web_cdn" {
-  enabled = true
+  enabled             = true
   default_root_object = "index.html"
 
   origin {
@@ -389,6 +470,9 @@ resource "aws_cloudfront_distribution" "web_cdn" {
   tags = { Name = "webapp-cdn" }
 }
 
+# -------------------------------------------------------
+# RDS MySQL
+# -------------------------------------------------------
 resource "aws_db_instance" "mysql_db" {
   allocated_storage       = 20
   engine                  = "mysql"
@@ -406,6 +490,27 @@ resource "aws_db_instance" "mysql_db" {
   tags                    = { Name = "devops-test-mysql" }
 }
 
+# -------------------------------------------------------
+# CloudWatch Alarm (EC2 CPU > 80%)
+# -------------------------------------------------------
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "high-cpu-ec2"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "EC2 CPU > 80% for 10 minutes"
+  dimensions = {
+    InstanceId = data.aws_instances.web_instances.ids[0]
+  }
+}
+
+# -------------------------------------------------------
+# Outputs
+# -------------------------------------------------------
 output "ec2_public_ip" {
   value = aws_eip.web_eip.public_ip
 }

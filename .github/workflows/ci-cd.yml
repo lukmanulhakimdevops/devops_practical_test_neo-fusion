@@ -31,7 +31,7 @@ jobs:
       - name: Extract Source Code Blueprint
         run: |
           mkdir -p extracted_source
-          7z x "artifacts/sources/SOURCE TodoWebAPI.7z" -oextracted_source
+          7z x "artifacts/sources/SOURCE_TodoWebAPI.7z" -oextracted_source
 
       - name: Build and Publish Source Code
         working-directory: ./extracted_source
@@ -73,7 +73,7 @@ jobs:
             aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
             echo "Extracting artifact with 7z..."
             sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-            echo "Finding the main DLL..."
+            echo "Finding main DLL..."
             MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
             if [ -z "$MAIN_DLL" ]; then
               echo "ERROR: Could not find main DLL"
