@@ -2,12 +2,12 @@ name: CI/CD Pipeline (Build from Source)
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
-  AWS_REGION: 'us-east-1'
+  AWS_REGION: us-east-1
 
 permissions:
   id-token: write
@@ -28,13 +28,13 @@ jobs:
       - name: Install compression tools
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Configure AWS credentials via OIDC
+      - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Download source code from S3
+      - name: Download source from S3
         run: |
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
           7z x SOURCE_TodoWebAPI.7z -oextracted_source
@@ -43,7 +43,7 @@ jobs:
         working-directory: ./extracted_source
         run: |
           dotnet restore
-          dotnet build --no-restore --configuration Release
+          dotnet build  --no-restore --configuration Release
           dotnet publish --no-build --configuration Release --output ./publish_output
 
       - name: Package to 7z
@@ -51,9 +51,10 @@ jobs:
           cd extracted_source/publish_output
           7z a ../../webapp-binaries.7z *
 
-      - name: Upload to S3 (overwrite latest)
+      - name: Upload artifact to S3
         run: |
-          aws s3 cp webapp-binaries.7z s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z
+          aws s3 cp webapp-binaries.7z \
+            s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0
@@ -65,34 +66,29 @@ jobs:
             set -e
             sudo systemctl stop webapp || true
             sudo mkdir -p /var/www/webapp
+            sudo apt-get install -y p7zip-full 2>/dev/null || true
             aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
             sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-            MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+            sudo chown -R www-data:www-data /var/www/webapp
+            MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
             if [ -z "$MAIN_DLL" ]; then
-              echo "ERROR: Main DLL not found"
-              exit 1
+              echo "ERROR: Main DLL not found"; exit 1
             fi
             APP_DIR=$(dirname "$MAIN_DLL")
-            # Update connection string using secrets
             RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
-            CONN_STRING="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
-            sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
-            sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
-[Unit]
-Description=DotNet Web API
-After=network.target
-[Service]
-WorkingDirectory=APP_DIR_PLACEHOLDER
-ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
-Restart=always
-User=root
-StandardOutput=append:/var/log/webapp.log
-StandardError=append:/var/log/webapp.log
-[Install]
-WantedBy=multi-user.target
-SVC
-            sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
-            sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
+            CONN="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
+            sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN\"|" \
+              "$APP_DIR/appsettings.json" || true
+            printf '%s\n' \
+              '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
+              '[Service]' \
+              "WorkingDirectory=$APP_DIR" \
+              "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
+              'Restart=always' 'User=www-data' \
+              'StandardOutput=append:/var/log/webapp.log' \
+              'StandardError=append:/var/log/webapp.log' '' \
+              '[Install]' 'WantedBy=multi-user.target' \
+              | sudo tee /etc/systemd/system/webapp.service > /dev/null
             sudo systemctl daemon-reload
             sudo systemctl enable webapp
             sudo systemctl start webapp

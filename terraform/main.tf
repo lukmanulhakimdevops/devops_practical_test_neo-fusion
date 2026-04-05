@@ -17,9 +17,6 @@ variable "aws_region" {
 variable "key_name" {
   default = "devops-test-key"
 }
-variable "private_key_path" {
-  default = "~/.ssh/devops-test-key.pem"
-}
 variable "github_repo" {}
 variable "db_name" {}
 variable "db_username" {
@@ -33,15 +30,16 @@ data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"]
   filter {
-    name   = "name"
+    name = "name"
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
   filter {
-    name   = "virtualization-type"
+    name = "virtualization-type"
     values = ["hvm"]
   }
 }
 
+# VPC
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
@@ -85,8 +83,15 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Security Groups
 resource "aws_security_group" "app_sg" {
   vpc_id = aws_vpc.main.id
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
   ingress {
     from_port   = 80
     to_port     = 80
@@ -96,12 +101,6 @@ resource "aws_security_group" "app_sg" {
   ingress {
     from_port   = 443
     to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 22
-    to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -131,6 +130,7 @@ resource "aws_security_group" "db_sg" {
   tags = { Name = "db-sg" }
 }
 
+# S3
 resource "aws_s3_bucket" "app_bucket" {
   bucket_prefix = "devops-test-bucket-"
   force_destroy = true
@@ -138,18 +138,20 @@ resource "aws_s3_bucket" "app_bucket" {
 }
 
 resource "aws_s3_bucket_public_access_block" "app_bucket_block" {
-  bucket = aws_s3_bucket.app_bucket.id
+  bucket                  = aws_s3_bucket.app_bucket.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
 
+# RDS Subnet Group
 resource "aws_db_subnet_group" "db_subnet_group" {
   name       = "db-subnet-group"
   subnet_ids = [aws_subnet.private_1.id, aws_subnet.private_2.id]
 }
 
+# IAM Roles
 resource "aws_iam_role" "ec2_s3_role" {
   name_prefix = "ec2-s3-role-"
   assume_role_policy = jsonencode({
@@ -230,11 +232,31 @@ resource "aws_iam_role_policy" "github_actions_policy" {
   })
 }
 
+# Elastic IP
 resource "aws_eip" "web_eip" {
   domain = "vpc"
   tags = { Name = "webapp-eip" }
 }
 
+# RDS
+resource "aws_db_instance" "mysql_db" {
+  allocated_storage       = 20
+  engine                  = "mysql"
+  engine_version          = "8.0"
+  instance_class          = "db.t3.micro"
+  db_name                 = var.db_name
+  username                = var.db_username
+  password                = var.db_password
+  parameter_group_name    = "default.mysql8.0"
+  skip_final_snapshot     = true
+  publicly_accessible     = false
+  vpc_security_group_ids  = [aws_security_group.db_sg.id]
+  db_subnet_group_name    = aws_db_subnet_group.db_subnet_group.name
+  backup_retention_period = 7
+  tags = { Name = "devops-test-mysql" }
+}
+
+# EC2 User Data
 locals {
   user_data = <<-USERDATA
 #!/bin/bash
@@ -244,7 +266,7 @@ export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
 exec > >(tee /var/log/user-data.log|logger -t user-data) 2>&1
-echo "=== Bootstrapping EC2 instance ==="
+echo "=== Bootstrapping EC2: $(date) ==="
 
 sudo sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
 sudo rm -rf /var/lib/apt/lists/*
@@ -258,17 +280,18 @@ sudo dpkg -i packages-microsoft-prod.deb
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get install -y dotnet-runtime-6.0
 
-# Install CloudWatch Agent
+# CloudWatch Agent
 sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
 sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
 sudo rm -f amazon-cloudwatch-agent.deb
+
 sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json > /dev/null << 'CWEOF'
 {
   "logs": {
     "logs_collected": {
       "files": {
         "collect_list": [
-          {"file_path": "/var/log/webapp.log", "log_group_name": "/aws/ec2/webapp", "log_stream_name": "{instance_id}", "retention_in_days": 7},
+          {"file_path": "/var/log/webapp.log",    "log_group_name": "/aws/ec2/webapp",     "log_stream_name": "{instance_id}", "retention_in_days": 7},
           {"file_path": "/var/log/user-data.log", "log_group_name": "/aws/ec2/user-data", "log_stream_name": "{instance_id}", "retention_in_days": 7}
         ]
       }
@@ -282,42 +305,38 @@ sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json > /de
   }
 }
 CWEOF
-sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
 aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
 sudo mkdir -p /var/www/webapp
 sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
+sudo chown -R www-data:www-data /var/www/webapp
 
-MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
 if [ -z "$MAIN_DLL" ]; then
-    echo "ERROR: Main DLL not found"
-    exit 1
+  echo "ERROR: Main DLL not found"; exit 1
 fi
 APP_DIR=$(dirname "$MAIN_DLL")
-echo "Found main DLL: $MAIN_DLL"
+echo "Main DLL: $MAIN_DLL"
 
 RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
 RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
 CONN_STRING="Server=$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
-sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
+sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" \
+  "$APP_DIR/appsettings.json" || true
 
-sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
-[Unit]
-Description=DotNet Web API
-After=network.target
-[Service]
-WorkingDirectory=APP_DIR_PLACEHOLDER
-ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
-Restart=always
-User=root
-StandardOutput=append:/var/log/webapp.log
-StandardError=append:/var/log/webapp.log
-[Install]
-WantedBy=multi-user.target
-SVC
-sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
-sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
+printf '%s\n' \
+  '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
+  '[Service]' \
+  "WorkingDirectory=$APP_DIR" \
+  "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
+  'Restart=always' 'User=www-data' \
+  'StandardOutput=append:/var/log/webapp.log' \
+  'StandardError=append:/var/log/webapp.log' '' \
+  '[Install]' 'WantedBy=multi-user.target' \
+  | sudo tee /etc/systemd/system/webapp.service > /dev/null
 
 sudo systemctl daemon-reload
 sudo systemctl enable webapp
@@ -325,21 +344,24 @@ sudo systemctl start webapp
 
 sleep 10
 if curl -sf http://localhost:80/swagger/index.html > /dev/null; then
-    echo "Application started successfully."
+  echo "App started successfully."
 else
-    echo "WARNING: App not responding, check logs."
-    sudo systemctl status webapp --no-pager || true
-    sudo cat /var/log/webapp.log || true
+  echo "WARNING: App not responding — check /var/log/webapp.log"
+  sudo systemctl status webapp --no-pager || true
 fi
+echo "=== Bootstrap complete: $(date) ==="
 USERDATA
 }
 
+# Launch Template & ASG
 resource "aws_launch_template" "web_lt" {
   name_prefix   = "web-lt-"
   image_id      = data.aws_ami.ubuntu.id
   instance_type = "t2.micro"
   key_name      = var.key_name
-  iam_instance_profile { name = aws_iam_instance_profile.ec2_profile.name }
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_profile.name
+  }
   user_data = base64encode(local.user_data)
   vpc_security_group_ids = [aws_security_group.app_sg.id]
   tags = { Name = "WebAppEC2" }
@@ -363,7 +385,9 @@ resource "aws_autoscaling_group" "web_asg" {
 }
 
 data "aws_instances" "web_instances" {
-  instance_tags = { Name = "WebAppEC2" }
+  instance_tags = {
+    Name = "WebAppEC2"
+  }
   depends_on = [aws_autoscaling_group.web_asg]
 }
 
@@ -372,9 +396,9 @@ resource "aws_eip_association" "web_eip_assoc" {
   allocation_id = aws_eip.web_eip.id
 }
 
+# CloudFront
 resource "aws_cloudfront_distribution" "web_cdn" {
   enabled = true
-  default_root_object = "index.html"
   origin {
     domain_name = aws_eip.web_eip.public_dns
     origin_id   = "webapp-origin"
@@ -386,20 +410,25 @@ resource "aws_cloudfront_distribution" "web_cdn" {
     }
   }
   default_cache_behavior {
-    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods         = ["GET", "HEAD"]
     target_origin_id       = "webapp-origin"
     viewer_protocol_policy = "redirect-to-https"
     forwarded_values {
-      query_string = false
-      cookies { forward = "none" }
+      query_string = true
+      headers      = ["Authorization", "Content-Type"]
+      cookies {
+        forward = "all"
+      }
     }
     min_ttl     = 0
-    default_ttl = 3600
-    max_ttl     = 86400
+    default_ttl = 0
+    max_ttl     = 0
   }
   restrictions {
-    geo_restriction { restriction_type = "none" }
+    geo_restriction {
+      restriction_type = "none"
+    }
   }
   viewer_certificate {
     cloudfront_default_certificate = true
@@ -407,25 +436,9 @@ resource "aws_cloudfront_distribution" "web_cdn" {
   tags = { Name = "webapp-cdn" }
 }
 
-resource "aws_db_instance" "mysql_db" {
-  allocated_storage       = 20
-  engine                  = "mysql"
-  engine_version          = "8.0"
-  instance_class          = "db.t3.micro"
-  db_name                 = var.db_name
-  username                = var.db_username
-  password                = var.db_password
-  parameter_group_name    = "default.mysql8.0"
-  skip_final_snapshot     = true
-  publicly_accessible     = false
-  vpc_security_group_ids  = [aws_security_group.db_sg.id]
-  db_subnet_group_name    = aws_db_subnet_group.db_subnet_group.name
-  backup_retention_period = 7
-  tags                    = { Name = "devops-test-mysql" }
-}
-
+# CloudWatch Alarms
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  alarm_name          = "high-cpu-ec2"
+  alarm_name          = "high-cpu-asg"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "CPUUtilization"
@@ -433,7 +446,10 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   period              = 300
   statistic           = "Average"
   threshold           = 80
-  dimensions = { InstanceId = data.aws_instances.web_instances.ids[0] }
+  alarm_description   = "EC2 CPU > 80% for 10 min"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.web_asg.name
+  }
 }
 
 resource "aws_cloudwatch_metric_alarm" "high_db_connections" {
@@ -445,11 +461,23 @@ resource "aws_cloudwatch_metric_alarm" "high_db_connections" {
   period              = 300
   statistic           = "Average"
   threshold           = 50
-  dimensions = { DBInstanceIdentifier = aws_db_instance.mysql_db.id }
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.mysql_db.id
+  }
 }
 
-output "ec2_public_ip" { value = aws_eip.web_eip.public_ip }
-output "cloudfront_domain" { value = aws_cloudfront_distribution.web_cdn.domain_name }
-output "rds_endpoint" { value = aws_db_instance.mysql_db.endpoint }
-output "s3_bucket_name" { value = aws_s3_bucket.app_bucket.id }
-output "github_actions_role_arn" { value = aws_iam_role.github_actions_role.arn }
+output "ec2_public_ip" {
+  value = aws_eip.web_eip.public_ip
+}
+output "cloudfront_domain" {
+  value = aws_cloudfront_distribution.web_cdn.domain_name
+}
+output "rds_endpoint" {
+  value = aws_db_instance.mysql_db.endpoint
+}
+output "s3_bucket_name" {
+  value = aws_s3_bucket.app_bucket.id
+}
+output "github_actions_role_arn" {
+  value = aws_iam_role.github_actions_role.arn
+}
