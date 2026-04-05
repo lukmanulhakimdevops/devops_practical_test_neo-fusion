@@ -1,4 +1,4 @@
-name: Executive CI/CD Pipeline
+name: CI/CD Pipeline (Build from Source)
 
 on:
   push:
@@ -28,19 +28,19 @@ jobs:
       - name: Install compression tools
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Extract Source Code Blueprint
+      - name: Extract Source Code
         run: |
           mkdir -p extracted_source
           7z x "artifacts/sources/SOURCE_TodoWebAPI.7z" -oextracted_source
 
-      - name: Build and Publish Source Code
+      - name: Build and Publish
         working-directory: ./extracted_source
         run: |
           dotnet restore
           dotnet build --no-restore --configuration Release
           dotnet publish --no-build --configuration Release --output ./publish_output
 
-      - name: Package to 7z Payload
+      - name: Package to 7z
         run: |
           cd extracted_source/publish_output
           7z a ../../webapp-binaries.7z *
@@ -51,11 +51,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload Artifact Payload to S3
+      - name: Upload to S3
         run: |
           aws s3 cp webapp-binaries.7z s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z
 
-      - name: Trigger Remote Deployment to EC2
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -63,25 +63,22 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -e
-            echo "Waiting for EC2 to finish cloud-init provisioning..."
-            cloud-init status --wait || true
-            echo "Stopping existing service if any..."
             sudo systemctl stop webapp || true
-            echo "Creating application directory..."
             sudo mkdir -p /var/www/webapp
-            echo "Downloading artifact from S3..."
             aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
-            echo "Extracting artifact with 7z..."
             sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-            echo "Finding main DLL..."
             MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
             if [ -z "$MAIN_DLL" ]; then
-              echo "ERROR: Could not find main DLL"
+              echo "ERROR: Main DLL not found"
               exit 1
             fi
             APP_DIR=$(dirname "$MAIN_DLL")
-            echo "Main DLL: $MAIN_DLL"
-            echo "Creating systemd service file..."
+            # Update appsettings.json with RDS endpoint from secret
+            if [ -n "${{ secrets.RDS_ENDPOINT }}" ]; then
+              RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
+              CONN_STRING="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
+              sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" "$APP_DIR/appsettings.json" || true
+            fi
             sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
 Description=DotNet Web API
@@ -92,7 +89,6 @@ WorkingDirectory=APP_DIR_PLACEHOLDER
 ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
 Restart=always
 User=root
-Environment=ASPNETCORE_ENVIRONMENT=Production
 StandardOutput=append:/var/log/webapp.log
 StandardError=append:/var/log/webapp.log
 
@@ -101,10 +97,8 @@ WantedBy=multi-user.target
 SVC
             sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
             sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
-            echo "Reloading systemd and starting service..."
             sudo systemctl daemon-reload
             sudo systemctl enable webapp
             sudo systemctl start webapp
             sleep 5
             sudo systemctl status webapp --no-pager
-            echo "Deployment completed successfully."
