@@ -31,17 +31,22 @@ aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
 echo "=== Deploy aplikasi ==="
 sudo mkdir -p /var/www/webapp
 sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-sudo chmod +x /var/www/webapp/linux-x64/TodoWebAPI
+MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+if [ -z "$MAIN_DLL" ]; then
+    echo "ERROR: Main DLL not found"
+    exit 1
+fi
+APP_DIR=$(dirname "$MAIN_DLL")
 
 echo "=== Buat systemd service ==="
-sudo cat > /etc/systemd/system/webapp.service << 'SVC'
+sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
 Description=DotNet Web API
 After=network.target
 
 [Service]
-WorkingDirectory=/var/www/webapp/linux-x64
-ExecStart=/var/www/webapp/linux-x64/TodoWebAPI
+WorkingDirectory=APP_DIR_PLACEHOLDER
+ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
 Restart=always
 User=root
 Environment=ASPNETCORE_ENVIRONMENT=Production
@@ -51,6 +56,8 @@ StandardError=append:/var/log/webapp.log
 [Install]
 WantedBy=multi-user.target
 SVC
+sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
+sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
 
 echo "=== Start aplikasi ==="
 sudo systemctl daemon-reload

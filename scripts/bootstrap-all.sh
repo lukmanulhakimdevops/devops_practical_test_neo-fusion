@@ -188,7 +188,7 @@ jobs:
       - name: Extract Source Code Blueprint
         run: |
           mkdir -p extracted_source
-          7z x "artifacts/sources/SOURCE_TodoWebAPI.7z" -oextracted_source
+          7z x "artifacts/sources/SOURCE TodoWebAPI.7z" -oextracted_source
 
       - name: Build and Publish Source Code
         working-directory: ./extracted_source
@@ -228,10 +228,16 @@ jobs:
             sudo mkdir -p /var/www/webapp
             echo "Downloading artifact from S3..."
             aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
-            echo "Extracting artifact natively with 7z..."
+            echo "Extracting artifact with 7z..."
             sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-            echo "Setting execution permissions for the Linux binary..."
-            sudo chmod +x /var/www/webapp/linux-x64/TodoWebAPI
+            echo "Finding the main DLL..."
+            MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+            if [ -z "$MAIN_DLL" ]; then
+              echo "ERROR: Could not find main DLL"
+              exit 1
+            fi
+            APP_DIR=$(dirname "$MAIN_DLL")
+            echo "Main DLL: $MAIN_DLL"
             echo "Creating systemd service file..."
             sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
@@ -239,8 +245,8 @@ Description=DotNet Web API
 After=network.target
 
 [Service]
-WorkingDirectory=/var/www/webapp/linux-x64
-ExecStart=/var/www/webapp/linux-x64/TodoWebAPI
+WorkingDirectory=APP_DIR_PLACEHOLDER
+ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
 Restart=always
 User=root
 Environment=ASPNETCORE_ENVIRONMENT=Production
@@ -250,6 +256,8 @@ StandardError=append:/var/log/webapp.log
 [Install]
 WantedBy=multi-user.target
 SVC
+            sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
+            sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
             echo "Reloading systemd and starting service..."
             sudo systemctl daemon-reload
             sudo systemctl enable webapp
@@ -298,17 +306,22 @@ aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
 echo "=== Deploy aplikasi ==="
 sudo mkdir -p /var/www/webapp
 sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-sudo chmod +x /var/www/webapp/linux-x64/TodoWebAPI
+MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+if [ -z "$MAIN_DLL" ]; then
+    echo "ERROR: Main DLL not found"
+    exit 1
+fi
+APP_DIR=$(dirname "$MAIN_DLL")
 
 echo "=== Buat systemd service ==="
-sudo cat > /etc/systemd/system/webapp.service << 'SVC'
+sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
 Description=DotNet Web API
 After=network.target
 
 [Service]
-WorkingDirectory=/var/www/webapp/linux-x64
-ExecStart=/var/www/webapp/linux-x64/TodoWebAPI
+WorkingDirectory=APP_DIR_PLACEHOLDER
+ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
 Restart=always
 User=root
 Environment=ASPNETCORE_ENVIRONMENT=Production
@@ -318,6 +331,8 @@ StandardError=append:/var/log/webapp.log
 [Install]
 WantedBy=multi-user.target
 SVC
+sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
+sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
 
 echo "=== Start aplikasi ==="
 sudo systemctl daemon-reload
@@ -594,20 +609,27 @@ sudo -E apt-get install -y dotnet-runtime-6.0
 
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
 echo "Bucket: $BUCKET_NAME"
-aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z || echo "Warning: webapp.7z not in S3 yet"
+aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
 
 sudo mkdir -p /var/www/webapp
-sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y || true
-sudo chmod +x /var/www/webapp/linux-x64/TodoWebAPI || true
+sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
 
-sudo cat > /etc/systemd/system/webapp.service << 'SVC'
+MAIN_DLL=$(find /var/www/webapp -name "TodoWebAPI.dll" -o -name "WebApp.dll" | head -1)
+if [ -z "$MAIN_DLL" ]; then
+    echo "ERROR: Could not find main DLL. Exiting."
+    exit 1
+fi
+APP_DIR=$(dirname "$MAIN_DLL")
+echo "Found main DLL: $MAIN_DLL"
+
+sudo tee /etc/systemd/system/webapp.service > /dev/null << 'SVC'
 [Unit]
 Description=DotNet Web API
 After=network.target
 
 [Service]
-WorkingDirectory=/var/www/webapp/linux-x64
-ExecStart=/var/www/webapp/linux-x64/TodoWebAPI
+WorkingDirectory=APP_DIR_PLACEHOLDER
+ExecStart=/usr/bin/dotnet MAIN_DLL_PLACEHOLDER
 Restart=always
 User=root
 Environment=ASPNETCORE_ENVIRONMENT=Production
@@ -618,9 +640,21 @@ StandardError=append:/var/log/webapp.log
 WantedBy=multi-user.target
 SVC
 
+sudo sed -i "s|APP_DIR_PLACEHOLDER|$APP_DIR|g" /etc/systemd/system/webapp.service
+sudo sed -i "s|MAIN_DLL_PLACEHOLDER|$MAIN_DLL|g" /etc/systemd/system/webapp.service
+
 sudo systemctl daemon-reload
 sudo systemctl enable webapp
-sudo systemctl start webapp || true
+sudo systemctl start webapp
+
+sleep 10
+if curl -sf http://localhost:80/swagger/index.html > /dev/null; then
+    echo "Application started successfully on port 80."
+else
+    echo "WARNING: Application not responding on port 80 — check logs."
+    sudo systemctl status webapp --no-pager || true
+    sudo cat /var/log/webapp.log || true
+fi
 
 echo "=== Bootstrap completed ==="
 USERDATA
@@ -682,25 +716,21 @@ resource "aws_cloudfront_distribution" "web_cdn" {
   }
 
   default_cache_behavior {
-    allowed_methods  = ["GET", "HEAD", "OPTIONS"]
-    cached_methods   = ["GET", "HEAD"]
-    target_origin_id = "webapp-origin"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "webapp-origin"
+    viewer_protocol_policy = "redirect-to-https"
     forwarded_values {
       query_string = false
-      cookies {
-        forward = "none"
-      }
+      cookies { forward = "none" }
     }
-    viewer_protocol_policy = "redirect-to-https"
-    min_ttl                = 0
-    default_ttl            = 3600
-    max_ttl                = 86400
+    min_ttl     = 0
+    default_ttl = 3600
+    max_ttl     = 86400
   }
 
   restrictions {
-    geo_restriction {
-      restriction_type = "none"
-    }
+    geo_restriction { restriction_type = "none" }
   }
 
   viewer_certificate {
@@ -724,7 +754,7 @@ resource "aws_db_instance" "mysql_db" {
   vpc_security_group_ids  = [aws_security_group.db_sg.id]
   db_subnet_group_name    = aws_db_subnet_group.db_subnet_group.name
   backup_retention_period = 7
-  tags = { Name = "devops-test-mysql" }
+  tags                    = { Name = "devops-test-mysql" }
 }
 
 output "ec2_public_ip" {
