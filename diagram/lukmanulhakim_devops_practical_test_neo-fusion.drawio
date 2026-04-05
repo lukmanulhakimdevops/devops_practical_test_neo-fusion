@@ -1,0 +1,122 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="KlX9foJJW9pwQOn7qLB9">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="BONM58Ud82UqCnZVrZWw-0" />
+        <mxCell id="BONM58Ud82UqCnZVrZWw-1" parent="BONM58Ud82UqCnZVrZWw-0" />
+        <mxCell id="aws-cloud" parent="BONM58Ud82UqCnZVrZWw-1" style="shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud;strokeColor=#232F3E;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#232F3E;dashed=0;" value="AWS Cloud (Free Tier)" vertex="1">
+          <mxGeometry height="650" width="850" x="400" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="vpc" parent="aws-cloud" style="shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_vpc;strokeColor=#248814;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#248814;dashed=0;" value="VPC (10.0.0.0/16)" vertex="1">
+          <mxGeometry height="380" width="600" x="40" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ec2" parent="vpc" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ec2;fillColor=#ED7100;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="EC2 t2.micro (Free Tier)" vertex="1">
+          <mxGeometry height="80" width="80" x="60" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="rds" parent="vpc" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.rds;fillColor=#3F8624;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="RDS db.t3.micro (Free Tier)" vertex="1">
+          <mxGeometry height="80" width="80" x="450" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="asg" parent="aws-cloud" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.autoscaling;fillColor=#5A6C3E;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="Auto Scaling Group (min=1, max=1)" vertex="1">
+          <mxGeometry height="80" width="80" x="40" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" parent="aws-cloud" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;fillColor=#C7131F;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="S3 Bucket (&lt;5GB, Free Tier)" vertex="1">
+          <mxGeometry height="80" width="80" x="700" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="cloudfront" parent="aws-cloud" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudfront;fillColor=#2D5F9E;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="CloudFront CDN (1TB/mo free)" vertex="1">
+          <mxGeometry height="80" width="80" x="700" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cloudwatch" parent="aws-cloud" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudwatch;fillColor=#4B8B3B;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="CloudWatch (Basic Metrics + 5GB logs)" vertex="1">
+          <mxGeometry height="80" width="80" x="40" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="iam" parent="aws-cloud" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.iam;fillColor=#C9252C;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="IAM Roles (OIDC, EC2, RDS)" vertex="1">
+          <mxGeometry height="80" width="80" x="700" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="conn-ec2-to-s3" edge="1" parent="aws-cloud" source="ec2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontColor=#232F3E;dashed=1;" target="s3" value="Pull binaries (IAM role)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="-300" y="450" />
+              <mxPoint x="340" y="450" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="conn-rds-to-s3" edge="1" parent="aws-cloud" source="rds" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontColor=#232F3E;dashed=1;" target="s3" value="Automated backup (free)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="90" y="480" />
+              <mxPoint x="340" y="480" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="conn-asg-to-ec2" edge="1" parent="aws-cloud" source="asg" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontColor=#232F3E;dashed=0;" target="ec2" value="Manages">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="conn-cloudfront-to-ec2" edge="1" parent="aws-cloud" source="cloudfront" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontColor=#232F3E;dashed=0;" target="ec2" value="Origin">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="340" y="140" />
+              <mxPoint x="-300" y="140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="conn-cloudwatch-to-ec2" edge="1" parent="aws-cloud" source="cloudwatch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontColor=#232F3E;dashed=1;" target="ec2" value="Logs &amp; Metrics">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="conn-iam-to-ec2" edge="1" parent="aws-cloud" source="iam" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontColor=#232F3E;dashed=1;" target="asg" value="Assumes Role">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="340" y="380" />
+              <mxPoint x="-320" y="380" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="github" parent="BONM58Ud82UqCnZVrZWw-1" style="shape=mxgraph.networks.git_hub;fillColor=#24292F;strokeColor=none;fontColor=#24292F;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="GitHub" vertex="1">
+          <mxGeometry height="80" width="80" x="20" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="github-icon" parent="BONM58Ud82UqCnZVrZWw-1" style="shape=image;html=1;verticalAlign=top;verticalLabelPosition=bottom;labelBackgroundColor=#ffffff;imageAspect=0;aspect=fixed;image=https://icons.diagrams.net/icon-cache1/Picons_Social-2097/github_rounded-685.svg" value="" vertex="1">
+          <mxGeometry height="57" width="57" x="31.5" y="291.5" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-actions" parent="BONM58Ud82UqCnZVrZWw-1" style="shape=mxgraph.aws4.group;strokeColor=#C7131F;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#C7131F;dashed=0;" value="GitHub Actions (CI/CD)" vertex="1">
+          <mxGeometry height="300" width="140" x="140" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="build" parent="gh-actions" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.codebuild;fillColor=#C7131F;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="Build" vertex="1">
+          <mxGeometry height="60" width="60" x="40" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="test" parent="gh-actions" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.codebuild;fillColor=#C7131F;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="Test" vertex="1">
+          <mxGeometry height="60" width="60" x="40" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="deploy" parent="gh-actions" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.codedeploy;fillColor=#C7131F;strokeColor=none;fontColor=#232F3E;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;" value="Deploy" vertex="1">
+          <mxGeometry height="60" width="60" x="40" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-arrow1" edge="1" parent="gh-actions" source="build" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="test">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="gh-arrow2" edge="1" parent="gh-actions" source="test" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="deploy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="conn-gh-to-actions" edge="1" parent="BONM58Ud82UqCnZVrZWw-1" source="github" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="gh-actions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="conn-deploy-to-ec2" edge="1" parent="BONM58Ud82UqCnZVrZWw-1" source="deploy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontColor=#232F3E;" target="ec2" value="Deploy via SSH">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="conn-deploy-to-s3" edge="1" parent="BONM58Ud82UqCnZVrZWw-1" source="deploy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontColor=#232F3E;dashed=1;" target="s3" value="Upload artifacts">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="210" y="530" />
+              <mxPoint x="740" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="free-tier-note" parent="BONM58Ud82UqCnZVrZWw-1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=12;" value="✅ All resources within AWS Free Tier limits:&#xa;   - EC2 t2.micro (750h/mo)&#xa;   - RDS db.t3.micro (750h/mo)&#xa;   - S3 5GB, EBS 30GB, CloudWatch 5GB logs&#xa;   - CloudFront 1TB/mo, IAM free, ASG free (min=1)" vertex="1">
+          <mxGeometry height="80" width="300" x="84" y="652" as="geometry" />
+        </mxCell>
+        <mxCell id="1TMppieivkfWofuad4Iy-0" parent="BONM58Ud82UqCnZVrZWw-1" style="outlineConnect=0;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;shape=mxgraph.aws3.iam;fillColor=#759C3E;gradientColor=none;" value="" vertex="1">
+          <mxGeometry height="81" width="42" x="1115" y="380" as="geometry" />
+        </mxCell>
+        <mxCell id="1TMppieivkfWofuad4Iy-1" edge="1" parent="BONM58Ud82UqCnZVrZWw-1" source="1TMppieivkfWofuad4Iy-0" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="1TMppieivkfWofuad4Iy-0">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
