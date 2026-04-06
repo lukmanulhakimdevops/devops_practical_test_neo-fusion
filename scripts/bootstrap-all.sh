@@ -903,7 +903,6 @@ upload_artifacts() {
     if [ -f "artifacts/sources/SOURCE_TodoWebAPI.7z" ]; then
         echo "[UPLOAD] Source code archive"
         aws s3 cp "artifacts/sources/SOURCE_TodoWebAPI.7z" "s3://$S3_BUCKET/artifacts/sources/SOURCE_TodoWebAPI.7z"
-        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/sources/SOURCE_TodoWebAPI.7z" --acl bucket-owner-full-control || true
     else
         echo "[ERROR] Source archive not found."
         exit 1
@@ -913,7 +912,6 @@ upload_artifacts() {
     if [ -f "artifacts/binaries/Binary-linux-x64.7z" ]; then
         echo "[UPLOAD] Pre-built binary (seed)"
         aws s3 cp "artifacts/binaries/Binary-linux-x64.7z" "s3://$S3_BUCKET/artifacts/binaries/webapp-binaries.7z"
-        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/binaries/webapp-binaries.7z" --acl bucket-owner-full-control || true
     else
         echo "[WARN] No pre-built binary. CI/CD will build from source."
     fi
