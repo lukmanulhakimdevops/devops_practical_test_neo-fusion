@@ -34,11 +34,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify identity and S3 access (debug)
-        run: |
-          aws sts get-caller-identity
-          aws s3 ls s3://${{ secrets.S3_BUCKET }}/sources/ || echo "Bucket listing failed, but continuing"
-
       - name: Download source from S3
         run: |
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
@@ -59,7 +54,8 @@ jobs:
       - name: Upload artifact to S3
         run: |
           aws s3 cp webapp-binaries.7z \
-            s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z
+            s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z \
+            --acl bucket-owner-full-control
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0

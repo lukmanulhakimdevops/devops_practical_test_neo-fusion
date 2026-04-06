@@ -196,7 +196,6 @@ resource "aws_iam_openid_connect_provider" "github" {
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
 }
 
-# FIXED: GitHub Actions role with correct permissions
 resource "aws_iam_role" "github_actions_role" {
   name_prefix = "github-actions-role-"
   assume_role_policy = jsonencode({
@@ -243,7 +242,7 @@ resource "aws_iam_role_policy" "github_actions_policy" {
   })
 }
 
-# Elastic IP (free when attached to running instance)
+# Elastic IP
 resource "aws_eip" "web_eip" {
   domain = "vpc"
   tags = { Name = "webapp-eip" }
@@ -267,9 +266,9 @@ resource "aws_db_instance" "mysql_db" {
   tags = { Name = "devops-test-mysql" }
 }
 
-# EC2 User Data
+# EC2 User Data (fixed: retry and don't fail if binary missing)
 locals {
-  user_data = <<-USERDATA
+  user_data = <<USERDATA
 #!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -320,46 +319,55 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
-aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
-sudo mkdir -p /var/www/webapp
-sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-sudo chown -R www-data:www-data /var/www/webapp
+# Wait up to 5 minutes for artifact (first deployment may be empty)
+for i in {1..30}; do
+  if aws s3 ls "s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z" &>/dev/null; then
+    aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
+    sudo mkdir -p /var/www/webapp
+    sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
+    sudo chown -R www-data:www-data /var/www/webapp
 
-MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
-if [ -z "$MAIN_DLL" ]; then
-  echo "ERROR: Main DLL not found"; exit 1
-fi
-APP_DIR=$(dirname "$MAIN_DLL")
-echo "Main DLL: $MAIN_DLL"
+    MAIN_DLL=$(find /var/www/webapp \\( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \\) | head -1)
+    if [ -z "$MAIN_DLL" ]; then
+      echo "ERROR: Main DLL not found"; exit 1
+    fi
+    APP_DIR=$(dirname "$MAIN_DLL")
+    echo "Main DLL: $MAIN_DLL"
 
-RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
-RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
-CONN_STRING="Server=$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
-sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" \
-  "$APP_DIR/appsettings.json" || true
+    RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
+    RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
+    CONN_STRING="Server=$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
+    sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" \
+      "$APP_DIR/appsettings.json" || true
 
-printf '%s\n' \
-  '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
-  '[Service]' \
-  "WorkingDirectory=$APP_DIR" \
-  "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
-  'Restart=always' 'User=www-data' \
-  'StandardOutput=append:/var/log/webapp.log' \
-  'StandardError=append:/var/log/webapp.log' '' \
-  '[Install]' 'WantedBy=multi-user.target' \
-  | sudo tee /etc/systemd/system/webapp.service > /dev/null
+    printf '%s\n' \
+      '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
+      '[Service]' \
+      "WorkingDirectory=$APP_DIR" \
+      "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
+      'Restart=always' 'User=www-data' \
+      'StandardOutput=append:/var/log/webapp.log' \
+      'StandardError=append:/var/log/webapp.log' '' \
+      '[Install]' 'WantedBy=multi-user.target' \
+      | sudo tee /etc/systemd/system/webapp.service > /dev/null
 
-sudo systemctl daemon-reload
-sudo systemctl enable webapp
-sudo systemctl start webapp
+    sudo systemctl daemon-reload
+    sudo systemctl enable webapp
+    sudo systemctl start webapp
 
-sleep 10
-if curl -sf http://localhost:80/swagger/index.html > /dev/null; then
-  echo "App started successfully."
-else
-  echo "WARNING: App not responding — check /var/log/webapp.log"
-  sudo systemctl status webapp --no-pager || true
-fi
+    sleep 10
+    if curl -sf http://localhost:80/swagger/index.html > /dev/null; then
+      echo "App started successfully."
+    else
+      echo "WARNING: App not responding — check /var/log/webapp.log"
+      sudo systemctl status webapp --no-pager || true
+    fi
+    break
+  fi
+  echo "Waiting for artifact... $i/30"
+  sleep 10
+done
+
 echo "=== Bootstrap complete: $(date) ==="
 USERDATA
 }
