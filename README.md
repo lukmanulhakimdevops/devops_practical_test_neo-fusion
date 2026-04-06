@@ -43,9 +43,9 @@ Every subsequent task was committed with descriptive messages (e.g., `feat: add 
 
 ### Architecture Diagram
 
-![Architecture Diagram](./architecture-diagram.png)
+![Architecture Diagram](./https://github.com/lukmanulhakimdevops/devops_practical_test_neo-fusion/blob/main/diagram/lukmanulhakim_devops_practical_test_neo-fusion.drawio.png)
 
-*Source file: `architecture-diagram.drawio`*
+*Source file: `https://github.com/lukmanulhakimdevops/devops_practical_test_neo-fusion/blob/main/diagram/lukmanulhakim_devops_practical_test_neo-fusion.drawio`*
 
 ### Components & Rationale
 
