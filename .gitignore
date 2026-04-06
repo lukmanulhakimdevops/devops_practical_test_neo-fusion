@@ -38,3 +38,44 @@ scripts/*.log
 *.pem
 *.key
 *.crt
+
+#Large binary artifacts (provided by devs) – DO NOT commit to GitHub
+artifacts/binaries/*.7z
+artifacts/binaries/*.zip
+artifacts/sources/*.7z
+artifacts/sources/*.zip
+*.7z
+*.zip
+
+# Terraform state files (sensitive)
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+.github/workflows/*.yml
+# OS generated files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Logs and temporary files
+*.log
+/tmp/
+*.tmp
+
+# Local scripts output
+scripts/*.log
+
+
+# User-specific files
+*.pem
+*.key
+*.crt
