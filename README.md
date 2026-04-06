@@ -43,7 +43,7 @@ Every subsequent task was committed with descriptive messages (e.g., `feat: add 
 
 ### Architecture Diagram
 
-![Architecture Diagram](./https://github.com/lukmanulhakimdevops/devops_practical_test_neo-fusion/blob/main/diagram/lukmanulhakim_devops_practical_test_neo-fusion.drawio.png)
+![Architecture Diagram](./diagram/lukmanulhakim_devops_practical_test_neo-fusion.drawio.png)
 
 *Source file: `https://github.com/lukmanulhakimdevops/devops_practical_test_neo-fusion/blob/main/diagram/lukmanulhakim_devops_practical_test_neo-fusion.drawio`*
 
