@@ -130,11 +130,18 @@ resource "aws_security_group" "db_sg" {
   tags = { Name = "db-sg" }
 }
 
-# S3
+# S3 Configuration
 resource "aws_s3_bucket" "app_bucket" {
   bucket_prefix = "devops-test-bucket-"
   force_destroy = true
   tags = { Name = "App Artifacts" }
+}
+
+resource "aws_s3_bucket_ownership_controls" "app_bucket_ownership" {
+  bucket = aws_s3_bucket.app_bucket.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "app_bucket_block" {
@@ -227,15 +234,17 @@ resource "aws_iam_role_policy" "github_actions_policy" {
         Effect   = "Allow"
         Resource = [
           aws_s3_bucket.app_bucket.arn,
-          "${aws_s3_bucket.app_bucket.arn}/sources/*",
-          "${aws_s3_bucket.app_bucket.arn}/artifacts/*"
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/sources/*",
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/binaries/*"
         ]
       },
       {
         Action   = ["s3:PutObject"]
         Effect   = "Allow"
         Resource = [
-          "${aws_s3_bucket.app_bucket.arn}/artifacts/latest/*"
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/binaries/*",
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/sources/*",
+          "${aws_s3_bucket.app_bucket.arn}/sql/*"
         ]
       }
     ]
@@ -266,9 +275,9 @@ resource "aws_db_instance" "mysql_db" {
   tags = { Name = "devops-test-mysql" }
 }
 
-# EC2 User Data (fixed: retry and don't fail if binary missing)
+# EC2 User Data
 locals {
-  user_data = <<USERDATA
+  user_data = <<-USERDATA
 #!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -283,12 +292,7 @@ sudo rm -rf /var/lib/apt/lists/*
 sudo mkdir -p /var/lib/apt/lists/partial
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get upgrade -y
-sudo -E apt-get install -y wget awscli mysql-client p7zip-full
-
-wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb
-sudo dpkg -i packages-microsoft-prod.deb
-sudo -E apt-get update --fix-missing -y
-sudo -E apt-get install -y dotnet-runtime-6.0
+sudo -E apt-get install -y wget awscli mysql-client p7zip-full dotnet-runtime-6.0
 
 # CloudWatch Agent
 sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
@@ -319,15 +323,15 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
-# Wait up to 5 minutes for artifact (first deployment may be empty)
+# Wait for binary artifact (seed from bootstrap) up to 5 minutes
 for i in {1..30}; do
-  if aws s3 ls "s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z" &>/dev/null; then
-    aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
+  if aws s3 ls "s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z" &>/dev/null; then
+    aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
     sudo mkdir -p /var/www/webapp
     sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
     sudo chown -R www-data:www-data /var/www/webapp
 
-    MAIN_DLL=$(find /var/www/webapp \\( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \\) | head -1)
+    MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
     if [ -z "$MAIN_DLL" ]; then
       echo "ERROR: Main DLL not found"; exit 1
     fi
@@ -340,16 +344,22 @@ for i in {1..30}; do
     sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" \
       "$APP_DIR/appsettings.json" || true
 
-    printf '%s\n' \
-      '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
-      '[Service]' \
-      "WorkingDirectory=$APP_DIR" \
-      "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
-      'Restart=always' 'User=www-data' \
-      'StandardOutput=append:/var/log/webapp.log' \
-      'StandardError=append:/var/log/webapp.log' '' \
-      '[Install]' 'WantedBy=multi-user.target' \
-      | sudo tee /etc/systemd/system/webapp.service > /dev/null
+    sudo tee /etc/systemd/system/webapp.service > /dev/null <<EOF
+[Unit]
+Description=DotNet Web API
+After=network.target
+
+[Service]
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/dotnet $MAIN_DLL
+Restart=always
+User=www-data
+StandardOutput=append:/var/log/webapp.log
+StandardError=append:/var/log/webapp.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
     sudo systemctl daemon-reload
     sudo systemctl enable webapp
@@ -364,7 +374,7 @@ for i in {1..30}; do
     fi
     break
   fi
-  echo "Waiting for artifact... $i/30"
+  echo "Waiting for binary artifact... $i/30"
   sleep 10
 done
 

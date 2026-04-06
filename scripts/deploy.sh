@@ -44,7 +44,7 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
 BUCKET_NAME="BUCKET_PLACEHOLDER"
-aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
+aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
 sudo mkdir -p /var/www/webapp
 sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
 sudo chown -R www-data:www-data /var/www/webapp

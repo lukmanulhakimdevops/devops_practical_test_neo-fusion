@@ -36,7 +36,7 @@ jobs:
 
       - name: Download source from S3
         run: |
-          aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
+          aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/sources/SOURCE_TodoWebAPI.7z .
           7z x SOURCE_TodoWebAPI.7z -oextracted_source
 
       - name: Build and Publish
@@ -54,8 +54,7 @@ jobs:
       - name: Upload artifact to S3
         run: |
           aws s3 cp webapp-binaries.7z \
-            s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z \
-            --acl bucket-owner-full-control
+            s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.7z
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0
@@ -68,7 +67,7 @@ jobs:
             sudo systemctl stop webapp || true
             sudo mkdir -p /var/www/webapp
             sudo apt-get install -y p7zip-full 2>/dev/null || true
-            aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
+            aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
             sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
             sudo chown -R www-data:www-data /var/www/webapp
             MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)

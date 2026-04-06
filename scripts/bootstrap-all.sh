@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
 echo "============================================="
 echo "Neo Fusion DevOps - Full Free Tier Solution"
@@ -40,36 +40,6 @@ echo "[INFO] Region: $AWS_REGION | Repo: $REPO | DB: $DB_NAME (credentials hidde
 cd "$(dirname "${BASH_SOURCE[0]}")"
 if [[ "$(basename "$PWD")" == "scripts" ]]; then cd ..; fi
 echo "[DIR] Working dir: $PWD"
-
-# ------------------------------
-# Helper functions
-# ------------------------------
-retry() {
-    local n=0 max=5 delay=5
-    until "$@"; do
-        n=$((n+1))
-        if [[ $n -ge $max ]]; then
-            echo "[ERROR] Command failed after $n attempts: $*" >&2
-            return 1
-        fi
-        echo "[RETRY] $n/$max – retrying in ${delay}s..."
-        sleep $delay
-    done
-}
-
-wait_for_ec2_ssh() {
-    local ip="$1"
-    echo "[WAIT] Checking SSH on $ip:22 ..."
-    for i in {1..30}; do
-        if nc -z "$ip" 22; then
-            echo "[OK] SSH ready"
-            return 0
-        fi
-        sleep 10
-    done
-    echo "[ERROR] EC2 not reachable after 5 minutes"
-    exit 1
-}
 
 # ------------------------------
 # Git helpers
@@ -133,7 +103,7 @@ install_prereqs() {
                 ;;
         esac
     done
-    sudo apt install -y jq unzip p7zip-full zip netcat-openbsd >/dev/null
+    sudo apt install -y jq unzip p7zip-full zip >/dev/null
     echo "[OK] Prerequisites ready."
 }
 
@@ -213,7 +183,7 @@ jobs:
 
       - name: Download source from S3
         run: |
-          aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
+          aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/sources/SOURCE_TodoWebAPI.7z .
           7z x SOURCE_TodoWebAPI.7z -oextracted_source
 
       - name: Build and Publish
@@ -231,8 +201,7 @@ jobs:
       - name: Upload artifact to S3
         run: |
           aws s3 cp webapp-binaries.7z \
-            s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z \
-            --acl bucket-owner-full-control
+            s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.7z
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0
@@ -245,7 +214,7 @@ jobs:
             sudo systemctl stop webapp || true
             sudo mkdir -p /var/www/webapp
             sudo apt-get install -y p7zip-full 2>/dev/null || true
-            aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
+            aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
             sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
             sudo chown -R www-data:www-data /var/www/webapp
             MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
@@ -274,6 +243,83 @@ jobs:
             sudo systemctl status webapp --no-pager
 GH_WORKFLOW_EOF
     echo "[OK] .github/workflows/ci-cd.yml created."
+}
+
+create_deploy_script() {
+    mkdir -p scripts
+    cat > scripts/deploy.sh << 'DEPLOY_EOF'
+#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
+sudo sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
+sudo rm -rf /var/lib/apt/lists/* && sudo mkdir -p /var/lib/apt/lists/partial
+sudo -E apt-get update --fix-missing -y
+sudo -E apt-get upgrade -y
+sudo -E apt-get install -y wget awscli mysql-client p7zip-full
+
+wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+sudo -E apt-get update --fix-missing -y
+sudo -E apt-get install -y dotnet-runtime-6.0
+
+# CloudWatch Agent
+sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
+sudo rm -f amazon-cloudwatch-agent.deb
+
+sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json > /dev/null << 'CWEOF'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {"file_path": "/var/log/webapp.log",    "log_group_name": "/aws/ec2/webapp",     "log_stream_name": "{instance_id}", "retention_in_days": 7},
+          {"file_path": "/var/log/user-data.log", "log_group_name": "/aws/ec2/user-data", "log_stream_name": "{instance_id}", "retention_in_days": 7}
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "metrics_collected": {
+      "cpu": {"measurement": ["cpu_usage_idle", "cpu_usage_user"], "metrics_collection_interval": 60},
+      "mem": {"measurement": ["mem_used_percent"], "metrics_collection_interval": 60}
+    }
+  }
+}
+CWEOF
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+BUCKET_NAME="BUCKET_PLACEHOLDER"
+aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
+sudo mkdir -p /var/www/webapp
+sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
+sudo chown -R www-data:www-data /var/www/webapp
+
+MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
+[ -z "$MAIN_DLL" ] && { echo "ERROR: Main DLL not found"; exit 1; }
+APP_DIR=$(dirname "$MAIN_DLL")
+
+printf '%s\n' \
+  '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
+  '[Service]' \
+  "WorkingDirectory=$APP_DIR" \
+  "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
+  'Restart=always' 'User=www-data' \
+  'StandardOutput=append:/var/log/webapp.log' \
+  'StandardError=append:/var/log/webapp.log' '' \
+  '[Install]' 'WantedBy=multi-user.target' \
+  | sudo tee /etc/systemd/system/webapp.service > /dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl enable webapp
+sudo systemctl start webapp
+DEPLOY_EOF
+    chmod +x scripts/deploy.sh
+    echo "[OK] scripts/deploy.sh created."
 }
 
 create_main_tf() {
@@ -411,11 +457,18 @@ resource "aws_security_group" "db_sg" {
   tags = { Name = "db-sg" }
 }
 
-# S3
+# S3 Configuration
 resource "aws_s3_bucket" "app_bucket" {
   bucket_prefix = "devops-test-bucket-"
   force_destroy = true
   tags = { Name = "App Artifacts" }
+}
+
+resource "aws_s3_bucket_ownership_controls" "app_bucket_ownership" {
+  bucket = aws_s3_bucket.app_bucket.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "app_bucket_block" {
@@ -508,15 +561,17 @@ resource "aws_iam_role_policy" "github_actions_policy" {
         Effect   = "Allow"
         Resource = [
           aws_s3_bucket.app_bucket.arn,
-          "${aws_s3_bucket.app_bucket.arn}/sources/*",
-          "${aws_s3_bucket.app_bucket.arn}/artifacts/*"
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/sources/*",
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/binaries/*"
         ]
       },
       {
         Action   = ["s3:PutObject"]
         Effect   = "Allow"
         Resource = [
-          "${aws_s3_bucket.app_bucket.arn}/artifacts/latest/*"
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/binaries/*",
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/sources/*",
+          "${aws_s3_bucket.app_bucket.arn}/sql/*"
         ]
       }
     ]
@@ -547,9 +602,9 @@ resource "aws_db_instance" "mysql_db" {
   tags = { Name = "devops-test-mysql" }
 }
 
-# EC2 User Data (fixed: retry and don't fail if binary missing)
+# EC2 User Data
 locals {
-  user_data = <<USERDATA
+  user_data = <<-USERDATA
 #!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -564,12 +619,7 @@ sudo rm -rf /var/lib/apt/lists/*
 sudo mkdir -p /var/lib/apt/lists/partial
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get upgrade -y
-sudo -E apt-get install -y wget awscli mysql-client p7zip-full
-
-wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb
-sudo dpkg -i packages-microsoft-prod.deb
-sudo -E apt-get update --fix-missing -y
-sudo -E apt-get install -y dotnet-runtime-6.0
+sudo -E apt-get install -y wget awscli mysql-client p7zip-full dotnet-runtime-6.0
 
 # CloudWatch Agent
 sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
@@ -600,15 +650,15 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
-# Wait up to 5 minutes for artifact (first deployment may be empty)
+# Wait for binary artifact (seed from bootstrap) up to 5 minutes
 for i in {1..30}; do
-  if aws s3 ls "s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z" &>/dev/null; then
-    aws s3 cp s3://$BUCKET_NAME/artifacts/latest/webapp-binaries.7z /tmp/webapp.7z
+  if aws s3 ls "s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z" &>/dev/null; then
+    aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
     sudo mkdir -p /var/www/webapp
     sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
     sudo chown -R www-data:www-data /var/www/webapp
 
-    MAIN_DLL=$(find /var/www/webapp \\( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \\) | head -1)
+    MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
     if [ -z "$MAIN_DLL" ]; then
       echo "ERROR: Main DLL not found"; exit 1
     fi
@@ -621,16 +671,22 @@ for i in {1..30}; do
     sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" \
       "$APP_DIR/appsettings.json" || true
 
-    printf '%s\n' \
-      '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
-      '[Service]' \
-      "WorkingDirectory=$APP_DIR" \
-      "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
-      'Restart=always' 'User=www-data' \
-      'StandardOutput=append:/var/log/webapp.log' \
-      'StandardError=append:/var/log/webapp.log' '' \
-      '[Install]' 'WantedBy=multi-user.target' \
-      | sudo tee /etc/systemd/system/webapp.service > /dev/null
+    sudo tee /etc/systemd/system/webapp.service > /dev/null <<EOF
+[Unit]
+Description=DotNet Web API
+After=network.target
+
+[Service]
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/dotnet $MAIN_DLL
+Restart=always
+User=www-data
+StandardOutput=append:/var/log/webapp.log
+StandardError=append:/var/log/webapp.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
     sudo systemctl daemon-reload
     sudo systemctl enable webapp
@@ -645,7 +701,7 @@ for i in {1..30}; do
     fi
     break
   fi
-  echo "Waiting for artifact... $i/30"
+  echo "Waiting for binary artifact... $i/30"
   sleep 10
 done
 
@@ -788,11 +844,10 @@ MAIN_TF_EOF
 prepare_key_pair() {
     KEY_NAME="devops-test-key"
     PRIVATE_KEY_FILE="$HOME/.ssh/${KEY_NAME}.pem"
-    if ! aws ec2 describe-key-pairs --key-names "$KEY_NAME" &>/dev/null; then
-        echo "[KEY] Creating key pair: $KEY_NAME"
-        aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$PRIVATE_KEY_FILE"
-        chmod 400 "$PRIVATE_KEY_FILE"
-    fi
+    aws ec2 describe-key-pairs --key-names "$KEY_NAME" &>/dev/null && return
+    echo "[KEY] Creating key pair: $KEY_NAME"
+    aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$PRIVATE_KEY_FILE"
+    chmod 400 "$PRIVATE_KEY_FILE"
 }
 
 run_terraform() {
@@ -822,25 +877,27 @@ upload_artifacts() {
     [ -z "$S3_BUCKET" ] && return
     echo "[S3] Uploading artifacts to s3://$S3_BUCKET..."
 
-    # Upload pre-built binary (seed) if exists
-    if [ -f "artifacts/binaries/Binary-linux-x64.7z" ]; then
-        echo "[UPLOAD] Pre-built binary (seed)"
-        retry aws s3 cp "artifacts/binaries/Binary-linux-x64.7z" "s3://$S3_BUCKET/artifacts/latest/webapp-binaries.7z" --acl bucket-owner-full-control
-    else
-        echo "[WARN] No pre-built binary found."
-    fi
-
-    # Upload source code (required)
+    # Upload source code (required for CI/CD)
     if [ -f "artifacts/sources/SOURCE_TodoWebAPI.7z" ]; then
         echo "[UPLOAD] Source code archive"
-        retry aws s3 cp "artifacts/sources/SOURCE_TodoWebAPI.7z" "s3://$S3_BUCKET/sources/SOURCE_TodoWebAPI.7z" --acl bucket-owner-full-control
+        aws s3 cp "artifacts/sources/SOURCE_TodoWebAPI.7z" "s3://$S3_BUCKET/artifacts/sources/SOURCE_TodoWebAPI.7z"
+        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/sources/SOURCE_TodoWebAPI.7z" --acl bucket-owner-full-control || echo "ACL set failed"
     else
         echo "[ERROR] Source not found at artifacts/sources/SOURCE_TodoWebAPI.7z"
         exit 1
     fi
 
+    # Upload pre-built binary (seed) if exists
+    if [ -f "artifacts/binaries/Binary-linux-x64.7z" ]; then
+        echo "[UPLOAD] Pre-built binary (seed)"
+        aws s3 cp "artifacts/binaries/Binary-linux-x64.7z" "s3://$S3_BUCKET/artifacts/binaries/webapp-binaries.7z"
+        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/binaries/webapp-binaries.7z" --acl bucket-owner-full-control || echo "ACL set failed"
+    else
+        echo "[WARN] No pre-built binary found. CI/CD will build from source."
+    fi
+
     # Upload SQL
-    [ -f "artifacts/sql/TodoItem_DDL.sql" ] && aws s3 cp artifacts/sql/TodoItem_DDL.sql "s3://$S3_BUCKET/sql/" --acl bucket-owner-full-control
+    [ -f "artifacts/sql/TodoItem_DDL.sql" ] && aws s3 cp artifacts/sql/TodoItem_DDL.sql s3://$S3_BUCKET/sql/
     echo "[OK] Artifacts uploaded."
 }
 
@@ -848,13 +905,14 @@ add_ssh_key_to_ec2() {
     EC2_IP=$(cat /tmp/ec2_ip.txt 2>/dev/null)
     [ -z "$EC2_IP" ] && return
     [ -z "$SSH_PUB_KEY" ] && echo "[WARN] SSH_PUB_KEY not set, skipping." && return
-
-    wait_for_ec2_ssh "$EC2_IP"
-
     KEY_NAME="devops-test-key"
     PRIVATE_KEY_FILE="$HOME/.ssh/${KEY_NAME}.pem"
     echo "[SSH] Adding GitHub Actions deploy key to EC2..."
-    ssh -i "$PRIVATE_KEY_FILE" -o StrictHostKeyChecking=no ubuntu@"$EC2_IP" \
+    for i in {1..30}; do
+        if nc -z "$EC2_IP" 22; then break; fi
+        sleep 10
+    done
+    ssh -i "$PRIVATE_KEY_FILE" -o StrictHostKeyChecking=no ubuntu@$EC2_IP \
         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$SSH_PUB_KEY' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     echo "[OK] Deploy key added."
 }
@@ -868,6 +926,7 @@ github_setup
 configure_aws
 setup_github_secrets
 ensure_git_repo
+create_deploy_script
 create_github_workflow
 create_main_tf
 prepare_key_pair
@@ -883,12 +942,14 @@ echo "EC2 Elastic IP : $(cat /tmp/ec2_ip.txt 2>/dev/null || echo 'unknown')"
 echo "S3 Bucket      : $(cat /tmp/s3_bucket.txt 2>/dev/null || echo 'unknown')"
 echo "CloudFront     : $(cat /tmp/cdn_domain.txt 2>/dev/null || echo 'unknown')"
 echo ""
-echo "Pipeline: git push → GHA builds from SOURCE_TodoWebAPI.7z"
-echo "          → uploads to S3 → SSH deploys to EC2"
+echo "Artifact paths in S3:"
+echo "  - Source: s3://$(cat /tmp/s3_bucket.txt 2>/dev/null)/artifacts/sources/SOURCE_TodoWebAPI.7z"
+echo "  - Binary: s3://$(cat /tmp/s3_bucket.txt 2>/dev/null)/artifacts/binaries/webapp-binaries.7z"
+echo ""
+echo "Pipeline: git push → GHA builds from source → uploads binary → deploys to EC2"
 echo ""
 echo "Debug EC2:"
 echo "  ssh -i ~/.ssh/devops-test-key.pem ubuntu@$(cat /tmp/ec2_ip.txt 2>/dev/null)"
 echo "  sudo systemctl status webapp"
 echo "  sudo cat /var/log/webapp.log"
-echo "  sudo cat /var/log/user-data.log"
 echo "============================================="
