@@ -42,7 +42,7 @@ BUCKET_NAME="BUCKET_PLACEHOLDER"
 aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.zip /tmp/webapp.zip
 sudo mkdir -p /var/www/webapp
 sudo unzip -o /tmp/webapp.zip -d /var/www/webapp/
-sudo chown -R www-data:www-data /var/www/webapp
+sudo chown -R root:root /var/www/webapp
 RUNTIME_CONF=$(find /var/www/webapp -maxdepth 1 -name "*.runtimeconfig.json" | head -1)
 [ -z "$RUNTIME_CONF" ] && { echo "ERROR: .runtimeconfig.json not found"; exit 1; }
 MAIN_DLL="${RUNTIME_CONF%.runtimeconfig.json}.dll"
@@ -52,8 +52,10 @@ printf '%s\n' \
 '[Service]' \
 "WorkingDirectory=$APP_DIR" \
 "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
-'Restart=always' 'User=www-data' \
-'Environment=ASPNETCORE_URLS=http://+:5000' \
+'Restart=always' 'User=root' \
+'Environment=ASPNETCORE_URLS=http://+:80' \
+'Environment=ASPNETCORE_HTTPS_PORT=' \
+'Environment=ASPNETCORE_Kestrel__Certificates__Default__Path=' \
 'StandardOutput=append:/var/log/webapp.log' \
 'StandardError=append:/var/log/webapp.log' '' \
 '[Install]' 'WantedBy=multi-user.target' \

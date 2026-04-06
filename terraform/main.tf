@@ -109,12 +109,6 @@ resource "aws_security_group" "app_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  ingress {
-    from_port   = 5000
-    to_port     = 5000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -287,7 +281,7 @@ resource "aws_db_instance" "mysql_db" {
   tags = { Name = "devops-test-mysql" }
 }
 
-# EC2 User Data - FIX: escape bash $ with $$, and use proper syntax
+# EC2 User Data - port 80
 locals {
   user_data = <<-USERDATA
 #!/bin/bash
@@ -339,7 +333,7 @@ for i in {1..30}; do
     aws s3 cp s3://$$BUCKET_NAME/artifacts/binaries/webapp-binaries.zip /tmp/webapp.zip
     sudo mkdir -p /var/www/webapp
     sudo unzip -o /tmp/webapp.zip -d /var/www/webapp/
-    sudo chown -R www-data:www-data /var/www/webapp
+    sudo chown -R root:root /var/www/webapp
     RUNTIME_CONF=$$(find /var/www/webapp -maxdepth 1 -name "*.runtimeconfig.json" | head -1)
     if [ -z "$$RUNTIME_CONF" ]; then
       echo "ERROR: .runtimeconfig.json not found"
@@ -362,8 +356,10 @@ After=network.target
 WorkingDirectory=$$APP_DIR
 ExecStart=/usr/bin/dotnet $$MAIN_DLL
 Restart=always
-User=www-data
-Environment=ASPNETCORE_URLS=http://+:5000
+User=root
+Environment=ASPNETCORE_URLS=http://+:80
+Environment=ASPNETCORE_HTTPS_PORT=
+Environment=ASPNETCORE_Kestrel__Certificates__Default__Path=
 StandardOutput=append:/var/log/webapp.log
 StandardError=append:/var/log/webapp.log
 
@@ -374,8 +370,8 @@ EOF
     sudo systemctl enable webapp
     sudo systemctl start webapp
     sleep 10
-    if curl -sf http://localhost:5000/ > /dev/null; then
-      echo "App started successfully on port 5000."
+    if curl -sf http://localhost:80/ > /dev/null; then
+      echo "App started successfully on port 80 (HTTP)."
     else
       echo "WARNING: App not responding"
       sudo systemctl status webapp --no-pager || true
@@ -389,7 +385,7 @@ echo "=== Bootstrap complete: $$(date) ==="
 USERDATA
 }
 
-# Launch Template & ASG - FIX: version must be "$Latest" (single $, not $$)
+# Launch Template & ASG
 resource "aws_launch_template" "web_lt" {
   name_prefix   = "web-lt-"
   image_id      = data.aws_ami.ubuntu.id

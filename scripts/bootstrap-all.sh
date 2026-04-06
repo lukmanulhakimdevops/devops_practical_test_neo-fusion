@@ -3,6 +3,7 @@ set -e
 echo "============================================="
 echo "Neo Fusion DevOps - Full Free Tier Solution"
 echo "Deploy seed binary → EC2 boots; CI/CD rebuilds from source"
+echo "Swagger accessible on port 80 (HTTP) and 443 (HTTPS via CloudFront)"
 echo "============================================="
 
 # ------------------------------
@@ -150,7 +151,7 @@ on:
     branches: [main]
 env:
   AWS_REGION: us-east-1
-  APP_PORT: 5000
+  APP_PORT: 80
 permissions:
   id-token: write
   contents: read
@@ -207,7 +208,7 @@ jobs:
           script: |
             set -e
             echo "=============================================="
-            echo "[*] 🚀 Memulai Deployment TodoWebAPI v8.0"
+            echo "[*] 🚀 Memulai Deployment TodoWebAPI v8.0 (Port 80)"
             echo "=============================================="
             sudo systemctl stop webapp 2>/dev/null || true
             sudo mkdir -p /var/www/webapp
@@ -240,7 +241,7 @@ jobs:
               sudo sed -i "s~\"DefaultConnection\": \".*\"~\"DefaultConnection\": \"$CONN\"~" "$APP_DIR/appsettings.json" || true
               echo "✅ Connection string updated"
             fi
-            echo "[*] Konfigurasi Systemd Service (HTTP Mode - Production Safe)..."
+            echo "[*] Konfigurasi Systemd Service (HTTP Port 80 - Production Safe)..."
             sudo tee /etc/systemd/system/webapp.service > /dev/null << EOF
 [Unit]
 Description=TodoWebAPI - .NET 8.0 Production Service
@@ -252,17 +253,19 @@ WorkingDirectory=/var/www/webapp
 ExecStart=/usr/share/dotnet/dotnet ${MAIN_DLL}
 Restart=on-failure
 RestartSec=10
-User=www-data
-Group=www-data
+User=root
+Group=root
 
-# Force HTTP only, disable HTTPS di production
+# Force HTTP only on port 80
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=ASPNETCORE_URLS=http://+:${{ env.APP_PORT }}
+Environment=ASPNETCORE_HTTPS_PORT=
+Environment=ASPNETCORE_Kestrel__Certificates__Default__Path=
 Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
 Environment=DOTNET_ROOT=/usr/share/dotnet
 
-# Security Hardening
-NoNewPrivileges=true
+# Security Hardening (still reasonable)
+NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/www/webapp
@@ -284,10 +287,11 @@ EOF
               sudo journalctl -u webapp.service -n 50 --no-pager
               exit 1
             fi
-            echo "✅ Service webapp aktif di port ${{ env.APP_PORT }}"
+            echo "✅ Service webapp aktif di port ${{ env.APP_PORT }} (HTTP only)"
             echo "=============================================="
             echo "✅ DEPLOYMENT BERHASIL!"
-            echo "🔗 Swagger: http://<EC2_IP>:${{ env.APP_PORT }}/swagger"
+            echo "🔗 Akses melalui CloudFront (HTTPS): https://${{ secrets.CLOUDFRONT_DOMAIN }}/swagger"
+            echo "🔗 Akses langsung (HTTP): http://<EC2_IP>:${{ env.APP_PORT }}/swagger"
             echo "=============================================="
             sudo systemctl status webapp --no-pager
 GH_WORKFLOW_EOF
@@ -341,7 +345,7 @@ BUCKET_NAME="BUCKET_PLACEHOLDER"
 aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.zip /tmp/webapp.zip
 sudo mkdir -p /var/www/webapp
 sudo unzip -o /tmp/webapp.zip -d /var/www/webapp/
-sudo chown -R www-data:www-data /var/www/webapp
+sudo chown -R root:root /var/www/webapp
 RUNTIME_CONF=$(find /var/www/webapp -maxdepth 1 -name "*.runtimeconfig.json" | head -1)
 [ -z "$RUNTIME_CONF" ] && { echo "ERROR: .runtimeconfig.json not found"; exit 1; }
 MAIN_DLL="${RUNTIME_CONF%.runtimeconfig.json}.dll"
@@ -351,8 +355,10 @@ printf '%s\n' \
 '[Service]' \
 "WorkingDirectory=$APP_DIR" \
 "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
-'Restart=always' 'User=www-data' \
-'Environment=ASPNETCORE_URLS=http://+:5000' \
+'Restart=always' 'User=root' \
+'Environment=ASPNETCORE_URLS=http://+:80' \
+'Environment=ASPNETCORE_HTTPS_PORT=' \
+'Environment=ASPNETCORE_Kestrel__Certificates__Default__Path=' \
 'StandardOutput=append:/var/log/webapp.log' \
 'StandardError=append:/var/log/webapp.log' '' \
 '[Install]' 'WantedBy=multi-user.target' \
@@ -476,12 +482,6 @@ resource "aws_security_group" "app_sg" {
   ingress {
     from_port   = 443
     to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 5000
-    to_port     = 5000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -657,7 +657,7 @@ resource "aws_db_instance" "mysql_db" {
   tags = { Name = "devops-test-mysql" }
 }
 
-# EC2 User Data - FIX: escape bash $ with $$, and use proper syntax
+# EC2 User Data - port 80
 locals {
   user_data = <<-USERDATA
 #!/bin/bash
@@ -709,7 +709,7 @@ for i in {1..30}; do
     aws s3 cp s3://$$BUCKET_NAME/artifacts/binaries/webapp-binaries.zip /tmp/webapp.zip
     sudo mkdir -p /var/www/webapp
     sudo unzip -o /tmp/webapp.zip -d /var/www/webapp/
-    sudo chown -R www-data:www-data /var/www/webapp
+    sudo chown -R root:root /var/www/webapp
     RUNTIME_CONF=$$(find /var/www/webapp -maxdepth 1 -name "*.runtimeconfig.json" | head -1)
     if [ -z "$$RUNTIME_CONF" ]; then
       echo "ERROR: .runtimeconfig.json not found"
@@ -732,8 +732,10 @@ After=network.target
 WorkingDirectory=$$APP_DIR
 ExecStart=/usr/bin/dotnet $$MAIN_DLL
 Restart=always
-User=www-data
-Environment=ASPNETCORE_URLS=http://+:5000
+User=root
+Environment=ASPNETCORE_URLS=http://+:80
+Environment=ASPNETCORE_HTTPS_PORT=
+Environment=ASPNETCORE_Kestrel__Certificates__Default__Path=
 StandardOutput=append:/var/log/webapp.log
 StandardError=append:/var/log/webapp.log
 
@@ -744,8 +746,8 @@ EOF
     sudo systemctl enable webapp
     sudo systemctl start webapp
     sleep 10
-    if curl -sf http://localhost:5000/ > /dev/null; then
-      echo "App started successfully on port 5000."
+    if curl -sf http://localhost:80/ > /dev/null; then
+      echo "App started successfully on port 80 (HTTP)."
     else
       echo "WARNING: App not responding"
       sudo systemctl status webapp --no-pager || true
@@ -759,7 +761,7 @@ echo "=== Bootstrap complete: $$(date) ==="
 USERDATA
 }
 
-# Launch Template & ASG - FIX: version must be "$Latest" (single $, not $$)
+# Launch Template & ASG
 resource "aws_launch_template" "web_lt" {
   name_prefix   = "web-lt-"
   image_id      = data.aws_ami.ubuntu.id
@@ -919,6 +921,7 @@ run_terraform() {
   [ -n "$S3_BUCKET" ] && echo "$S3_BUCKET" | gh secret set S3_BUCKET --repo "$REPO"
   [ -n "$GHA_ROLE" ] && echo "$GHA_ROLE" | gh secret set AWS_OIDC_ROLE_ARN --repo "$REPO"
   [ -n "$RDS_ENDPOINT" ] && echo "$RDS_ENDPOINT" | gh secret set RDS_ENDPOINT --repo "$REPO"
+  [ -n "$CDN_DOMAIN" ] && echo "$CDN_DOMAIN" | gh secret set CLOUDFRONT_DOMAIN --repo "$REPO"
   echo "$EC2_IP" > /tmp/ec2_ip.txt
   echo "$S3_BUCKET" > /tmp/s3_bucket.txt
   echo "$CDN_DOMAIN" > /tmp/cdn_domain.txt
@@ -1001,8 +1004,9 @@ echo "EC2 Elastic IP : $(cat /tmp/ec2_ip.txt 2>/dev/null || echo 'unknown')"
 echo "S3 Bucket      : $(cat /tmp/s3_bucket.txt 2>/dev/null || echo 'unknown')"
 echo "CloudFront     : $(cat /tmp/cdn_domain.txt 2>/dev/null || echo 'unknown')"
 echo ""
-echo "Aplikasi berjalan di port 5000."
-echo "Swagger UI: http://$(cat /tmp/ec2_ip.txt 2>/dev/null):5000/swagger"
+echo "🔗 Swagger UI accessible on port 80 (HTTP) and 443 (HTTPS via CloudFront):"
+echo "   HTTPS: https://$(cat /tmp/cdn_domain.txt 2>/dev/null)/swagger"
+echo "   HTTP : http://$(cat /tmp/ec2_ip.txt 2>/dev/null)/swagger"
 echo ""
 echo "Debug: ssh -i ~/.ssh/devops-test-key.pem ubuntu@$(cat /tmp/ec2_ip.txt 2>/dev/null)"
 echo "============================================="
