@@ -1,44 +1,38 @@
 name: CI/CD Pipeline (Build from Source)
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
 env:
   AWS_REGION: us-east-1
-
+  APP_PORT: 5000
 permissions:
   id-token: write
   contents: read
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '6.0.x'
-
-      - name: Install compression tools
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
-
+          dotnet-version: '8.0.x'
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zip p7zip-full
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Download source from S3
         run: |
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/sources/SOURCE_TodoWebAPI.7z .
           7z x SOURCE_TodoWebAPI.7z -oextracted_source
-
       - name: Find project file
         id: findproj
         run: |
@@ -48,24 +42,18 @@ jobs:
             exit 1
           fi
           echo "proj_path=$PROJ_FILE" >> $GITHUB_OUTPUT
-          echo "proj_dir=$(dirname "$PROJ_FILE")" >> $GITHUB_OUTPUT
-
       - name: Build and Publish
         run: |
           dotnet restore "${{ steps.findproj.outputs.proj_path }}"
           dotnet build "${{ steps.findproj.outputs.proj_path }}" --no-restore --configuration Release
           dotnet publish "${{ steps.findproj.outputs.proj_path }}" --no-build --configuration Release --output ./publish_output
-
-      - name: Package to 7z
+      - name: Package to ZIP
         run: |
           cd publish_output
-          7z a ../webapp-binaries.7z *
-
+          zip -r ../webapp-binaries.zip .
       - name: Upload artifact to S3
         run: |
-          aws s3 cp webapp-binaries.7z \
-            s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.7z
-
+          aws s3 cp webapp-binaries.zip s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.zip
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -74,33 +62,87 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -e
-            sudo systemctl stop webapp || true
+            echo "=============================================="
+            echo "[*] 🚀 Memulai Deployment TodoWebAPI v8.0"
+            echo "=============================================="
+            sudo systemctl stop webapp 2>/dev/null || true
             sudo mkdir -p /var/www/webapp
-            sudo apt-get install -y p7zip-full 2>/dev/null || true
-            aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
-            sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
-            sudo chown -R www-data:www-data /var/www/webapp
-            MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
-            if [ -z "$MAIN_DLL" ]; then
-              echo "ERROR: Main DLL not found"; exit 1
+            sudo rm -rf /var/www/webapp/*
+            echo "[*] Memastikan .NET 8.0 SDK terinstal..."
+            if ! command -v dotnet &> /dev/null || ! dotnet --list-sdks | grep -q "^8\.0\."; then
+              wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh
+              sudo chmod +x /tmp/dotnet-install.sh
+              sudo /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet
+              sudo ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet
             fi
+            sudo apt-get update -y >/dev/null 2>&1
+            sudo apt-get install -y unzip curl >/dev/null 2>&1
+            echo "[*] Mengunduh artifact dari S3..."
+            aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/binaries/webapp-binaries.zip /tmp/webapp.zip
+            sudo unzip -o /tmp/webapp.zip -d /var/www/webapp
+            sudo chown -R www-data:www-data /var/www/webapp
+            sudo chmod -R 755 /var/www/webapp
+            RUNTIME_CONF=$(find /var/www/webapp -maxdepth 1 -name "*.runtimeconfig.json" | head -1)
+            if [ -z "$RUNTIME_CONF" ]; then
+              echo "❌ ERROR: File .runtimeconfig.json tidak ditemukan!"
+              exit 1
+            fi
+            MAIN_DLL="${RUNTIME_CONF%.runtimeconfig.json}.dll"
             APP_DIR=$(dirname "$MAIN_DLL")
+            echo "✅ Target Executable: $MAIN_DLL"
             RDS_HOST=$(echo "${{ secrets.RDS_ENDPOINT }}" | cut -d':' -f1)
             CONN="Server=$RDS_HOST;Database=${{ secrets.DB_NAME }};User=${{ secrets.DB_USER }};Password=${{ secrets.DB_PASSWORD }}"
-            sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN\"|" \
-              "$APP_DIR/appsettings.json" || true
-            printf '%s\n' \
-              '[Unit]' 'Description=DotNet Web API' 'After=network.target' '' \
-              '[Service]' \
-              "WorkingDirectory=$APP_DIR" \
-              "ExecStart=/usr/bin/dotnet $MAIN_DLL" \
-              'Restart=always' 'User=www-data' \
-              'StandardOutput=append:/var/log/webapp.log' \
-              'StandardError=append:/var/log/webapp.log' '' \
-              '[Install]' 'WantedBy=multi-user.target' \
-              | sudo tee /etc/systemd/system/webapp.service > /dev/null
+            if [ -f "$APP_DIR/appsettings.json" ]; then
+              sudo sed -i "s~\"DefaultConnection\": \".*\"~\"DefaultConnection\": \"$CONN\"~" "$APP_DIR/appsettings.json" || true
+              echo "✅ Connection string updated"
+            fi
+            echo "[*] Konfigurasi Systemd Service (HTTP Mode - Production Safe)..."
+            sudo tee /etc/systemd/system/webapp.service > /dev/null << EOF
+[Unit]
+Description=TodoWebAPI - .NET 8.0 Production Service
+After=network.target
+
+[Service]
+Type=exec
+WorkingDirectory=/var/www/webapp
+ExecStart=/usr/share/dotnet/dotnet ${MAIN_DLL}
+Restart=on-failure
+RestartSec=10
+User=www-data
+Group=www-data
+
+# Force HTTP only, disable HTTPS di production
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://+:${{ env.APP_PORT }}
+Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+Environment=DOTNET_ROOT=/usr/share/dotnet
+
+# Security Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/webapp
+PrivateTmp=true
+
+SyslogIdentifier=webapp-dotnet
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
             sudo systemctl daemon-reload
             sudo systemctl enable webapp
             sudo systemctl start webapp
             sleep 5
+            if ! sudo systemctl is-active --quiet webapp; then
+              echo "❌ CRITICAL: Service gagal start!"
+              sudo journalctl -u webapp.service -n 50 --no-pager
+              exit 1
+            fi
+            echo "✅ Service webapp aktif di port ${{ env.APP_PORT }}"
+            echo "=============================================="
+            echo "✅ DEPLOYMENT BERHASIL!"
+            echo "🔗 Swagger: http://<EC2_IP>:${{ env.APP_PORT }}/swagger"
+            echo "=============================================="
             sudo systemctl status webapp --no-pager

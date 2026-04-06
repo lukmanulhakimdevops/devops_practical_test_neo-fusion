@@ -14,14 +14,19 @@ provider "aws" {
 variable "aws_region" {
   default = "us-east-1"
 }
+
 variable "key_name" {
   default = "devops-test-key"
 }
+
 variable "github_repo" {}
+
 variable "db_name" {}
+
 variable "db_username" {
   sensitive = true
 }
+
 variable "db_password" {
   sensitive = true
 }
@@ -30,11 +35,11 @@ data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"]
   filter {
-    name = "name"
+    name   = "name"
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
   filter {
-    name = "virtualization-type"
+    name   = "virtualization-type"
     values = ["hvm"]
   }
 }
@@ -104,6 +109,12 @@ resource "aws_security_group" "app_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  ingress {
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -130,7 +141,7 @@ resource "aws_security_group" "db_sg" {
   tags = { Name = "db-sg" }
 }
 
-# S3 Configuration
+# S3
 resource "aws_s3_bucket" "app_bucket" {
   bucket_prefix = "devops-test-bucket-"
   force_destroy = true
@@ -152,13 +163,13 @@ resource "aws_s3_bucket_public_access_block" "app_bucket_block" {
   restrict_public_buckets = true
 }
 
-# RDS Subnet Group
+# RDS subnet group
 resource "aws_db_subnet_group" "db_subnet_group" {
   name       = "db-subnet-group"
   subnet_ids = [aws_subnet.private_1.id, aws_subnet.private_2.id]
 }
 
-# IAM Roles
+# IAM EC2 role
 resource "aws_iam_role" "ec2_s3_role" {
   name_prefix = "ec2-s3-role-"
   assume_role_policy = jsonencode({
@@ -197,6 +208,7 @@ resource "aws_iam_role_policy_attachment" "ec2_cw_policy" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
+# IAM GitHub OIDC
 resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
@@ -275,7 +287,7 @@ resource "aws_db_instance" "mysql_db" {
   tags = { Name = "devops-test-mysql" }
 }
 
-# EC2 User Data
+# EC2 User Data - FIX: escape bash $ with $$, and use proper syntax
 locals {
   user_data = <<-USERDATA
 #!/bin/bash
@@ -283,106 +295,101 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
-
 exec > >(tee /var/log/user-data.log|logger -t user-data) 2>&1
-echo "=== Bootstrapping EC2: $(date) ==="
-
-sudo sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
+echo "=== Bootstrapping EC2: $$(date) ==="
+sudo sed -i 's/#$$nrconf{restart} = .*/$$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
 sudo rm -rf /var/lib/apt/lists/*
 sudo mkdir -p /var/lib/apt/lists/partial
 sudo -E apt-get update --fix-missing -y
 sudo -E apt-get upgrade -y
-sudo -E apt-get install -y wget awscli mysql-client p7zip-full dotnet-runtime-6.0
-
+sudo -E apt-get install -y wget awscli mysql-client unzip
+wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh
+sudo chmod +x /tmp/dotnet-install.sh
+sudo /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet
+sudo ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet
 # CloudWatch Agent
 sudo wget -q https://s3.amazonaws.com/amazoncloudwatchagent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
 sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
 sudo rm -f amazon-cloudwatch-agent.deb
-
 sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json > /dev/null << 'CWEOF'
 {
-  "logs": {
-    "logs_collected": {
-      "files": {
-        "collect_list": [
-          {"file_path": "/var/log/webapp.log",    "log_group_name": "/aws/ec2/webapp",     "log_stream_name": "{instance_id}", "retention_in_days": 7},
-          {"file_path": "/var/log/user-data.log", "log_group_name": "/aws/ec2/user-data", "log_stream_name": "{instance_id}", "retention_in_days": 7}
-        ]
-      }
-    }
-  },
-  "metrics": {
-    "metrics_collected": {
-      "cpu": {"measurement": ["cpu_usage_idle", "cpu_usage_user"], "metrics_collection_interval": 60},
-      "mem": {"measurement": ["mem_used_percent"], "metrics_collection_interval": 60}
-    }
-  }
+"logs": {
+"logs_collected": {
+"files": {
+"collect_list": [
+{"file_path": "/var/log/webapp.log",    "log_group_name": "/aws/ec2/webapp",     "log_stream_name": "{instance_id}", "retention_in_days": 7},
+{"file_path": "/var/log/user-data.log", "log_group_name": "/aws/ec2/user-data", "log_stream_name": "{instance_id}", "retention_in_days": 7}
+]
+}
+}
+},
+"metrics": {
+"metrics_collected": {
+"cpu": {"measurement": ["cpu_usage_idle", "cpu_usage_user"], "metrics_collection_interval": 60},
+"mem": {"measurement": ["mem_used_percent"], "metrics_collection_interval": 60}
+}
+}
 }
 CWEOF
 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-  -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-
+-a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
-# Wait for binary artifact (seed from bootstrap)
 for i in {1..30}; do
-  if aws s3 ls "s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z" &>/dev/null; then
-    aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
+  if aws s3 ls "s3://$$BUCKET_NAME/artifacts/binaries/webapp-binaries.zip" &>/dev/null; then
+    aws s3 cp s3://$$BUCKET_NAME/artifacts/binaries/webapp-binaries.zip /tmp/webapp.zip
     sudo mkdir -p /var/www/webapp
-    sudo 7z x /tmp/webapp.7z -o/var/www/webapp/ -y
+    sudo unzip -o /tmp/webapp.zip -d /var/www/webapp/
     sudo chown -R www-data:www-data /var/www/webapp
-
-    MAIN_DLL=$(find /var/www/webapp \( -name "TodoWebAPI.dll" -o -name "WebApp.dll" \) | head -1)
-    if [ -z "$MAIN_DLL" ]; then
-      echo "ERROR: Main DLL not found"; exit 1
+    RUNTIME_CONF=$$(find /var/www/webapp -maxdepth 1 -name "*.runtimeconfig.json" | head -1)
+    if [ -z "$$RUNTIME_CONF" ]; then
+      echo "ERROR: .runtimeconfig.json not found"
+      exit 1
     fi
-    APP_DIR=$(dirname "$MAIN_DLL")
-    echo "Main DLL: $MAIN_DLL"
-
+    MAIN_DLL="$${RUNTIME_CONF%.runtimeconfig.json}.dll"
+    APP_DIR=$$(dirname "$$MAIN_DLL")
+    echo "Main DLL: $$MAIN_DLL"
     RDS_ENDPOINT="${aws_db_instance.mysql_db.endpoint}"
-    RDS_HOST=$(echo "$RDS_ENDPOINT" | cut -d':' -f1)
-    CONN_STRING="Server=$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
-    sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$CONN_STRING\"|" \
-      "$APP_DIR/appsettings.json" || true
-
+    RDS_HOST=$$(echo "$$RDS_ENDPOINT" | cut -d':' -f1)
+    CONN_STRING="Server=$$RDS_HOST;Database=${var.db_name};User=${var.db_username};Password=${var.db_password}"
+    sudo sed -i "s|\"DefaultConnection\": \".*\"|\"DefaultConnection\": \"$$CONN_STRING\"|" \
+      "$$APP_DIR/appsettings.json" || true
     sudo tee /etc/systemd/system/webapp.service > /dev/null <<EOF
 [Unit]
 Description=DotNet Web API
 After=network.target
 
 [Service]
-WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/dotnet $MAIN_DLL
+WorkingDirectory=$$APP_DIR
+ExecStart=/usr/bin/dotnet $$MAIN_DLL
 Restart=always
 User=www-data
+Environment=ASPNETCORE_URLS=http://+:5000
 StandardOutput=append:/var/log/webapp.log
 StandardError=append:/var/log/webapp.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
     sudo systemctl daemon-reload
     sudo systemctl enable webapp
     sudo systemctl start webapp
-
     sleep 10
-    if curl -sf http://localhost:80/swagger/index.html > /dev/null; then
-      echo "App started successfully."
+    if curl -sf http://localhost:5000/ > /dev/null; then
+      echo "App started successfully on port 5000."
     else
-      echo "WARNING: App not responding — check /var/log/webapp.log"
+      echo "WARNING: App not responding"
       sudo systemctl status webapp --no-pager || true
     fi
     break
   fi
-  echo "Waiting for binary artifact... $i/30"
+  echo "Waiting for binary artifact... $$i/30"
   sleep 10
 done
-
-echo "=== Bootstrap complete: $(date) ==="
+echo "=== Bootstrap complete: $$(date) ==="
 USERDATA
 }
 
-# Launch Template & ASG
+# Launch Template & ASG - FIX: version must be "$Latest" (single $, not $$)
 resource "aws_launch_template" "web_lt" {
   name_prefix   = "web-lt-"
   image_id      = data.aws_ami.ubuntu.id
@@ -498,15 +505,19 @@ resource "aws_cloudwatch_metric_alarm" "high_db_connections" {
 output "ec2_public_ip" {
   value = aws_eip.web_eip.public_ip
 }
+
 output "cloudfront_domain" {
   value = aws_cloudfront_distribution.web_cdn.domain_name
 }
+
 output "rds_endpoint" {
   value = aws_db_instance.mysql_db.endpoint
 }
+
 output "s3_bucket_name" {
   value = aws_s3_bucket.app_bucket.id
 }
+
 output "github_actions_role_arn" {
   value = aws_iam_role.github_actions_role.arn
 }
