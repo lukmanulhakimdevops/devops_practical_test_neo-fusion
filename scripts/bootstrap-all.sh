@@ -181,6 +181,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verify identity and S3 access (debug)
+        run: |
+          aws sts get-caller-identity
+          aws s3 ls s3://${{ secrets.S3_BUCKET }}/sources/ || echo "Bucket listing failed, but continuing"
+
       - name: Download source from S3
         run: |
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .
@@ -523,6 +528,7 @@ resource "aws_iam_openid_connect_provider" "github" {
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
 }
 
+# FIXED: GitHub Actions role with correct permissions
 resource "aws_iam_role" "github_actions_role" {
   name_prefix = "github-actions-role-"
   assume_role_policy = jsonencode({
@@ -548,18 +554,28 @@ resource "aws_iam_role_policy" "github_actions_policy" {
   role = aws_iam_role.github_actions_role.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Action   = ["s3:PutObject", "s3:ListBucket"]
-      Effect   = "Allow"
-      Resource = [
-        aws_s3_bucket.app_bucket.arn,
-        "${aws_s3_bucket.app_bucket.arn}/*"
-      ]
-    }]
+    Statement = [
+      {
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Effect   = "Allow"
+        Resource = [
+          aws_s3_bucket.app_bucket.arn,
+          "${aws_s3_bucket.app_bucket.arn}/sources/*",
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/*"
+        ]
+      },
+      {
+        Action   = ["s3:PutObject"]
+        Effect   = "Allow"
+        Resource = [
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/latest/*"
+        ]
+      }
+    ]
   })
 }
 
-# Elastic IP
+# Elastic IP (free when attached to running instance)
 resource "aws_eip" "web_eip" {
   domain = "vpc"
   tags = { Name = "webapp-eip" }
@@ -848,6 +864,7 @@ upload_artifacts() {
     [ -z "$S3_BUCKET" ] && return
     echo "[S3] Uploading artifacts to s3://$S3_BUCKET..."
 
+    # Upload pre-built binary (seed)
     if [ -f "artifacts/binaries/Binary-linux-x64.7z" ]; then
         echo "[UPLOAD] Pre-built binary (seed)"
         aws s3 cp "artifacts/binaries/Binary-linux-x64.7z" "s3://$S3_BUCKET/artifacts/latest/webapp-binaries.7z"
@@ -855,14 +872,18 @@ upload_artifacts() {
         echo "[WARN] No pre-built binary found."
     fi
 
+    # Upload source code
     if [ -f "artifacts/sources/SOURCE_TodoWebAPI.7z" ]; then
         echo "[UPLOAD] Source code archive"
         aws s3 cp "artifacts/sources/SOURCE_TodoWebAPI.7z" "s3://$S3_BUCKET/sources/SOURCE_TodoWebAPI.7z"
+        # Fix ACL to ensure bucket owner has full control (avoids 403 for OIDC role)
+        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "sources/SOURCE_TodoWebAPI.7z" --acl bucket-owner-full-control || echo "ACL set failed, but continuing"
     else
         echo "[ERROR] Source not found at artifacts/sources/SOURCE_TodoWebAPI.7z"
         exit 1
     fi
 
+    # Upload SQL
     [ -f "artifacts/sql/TodoItem_DDL.sql" ] && aws s3 cp artifacts/sql/TodoItem_DDL.sql s3://$S3_BUCKET/sql/
     echo "[OK] Artifacts uploaded."
 }

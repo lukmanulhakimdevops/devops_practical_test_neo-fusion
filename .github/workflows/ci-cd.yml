@@ -34,6 +34,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verify identity and S3 access (debug)
+        run: |
+          aws sts get-caller-identity
+          aws s3 ls s3://${{ secrets.S3_BUCKET }}/sources/ || echo "Bucket listing failed, but continuing"
+
       - name: Download source from S3
         run: |
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/sources/SOURCE_TodoWebAPI.7z .

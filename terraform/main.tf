@@ -196,6 +196,7 @@ resource "aws_iam_openid_connect_provider" "github" {
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
 }
 
+# FIXED: GitHub Actions role with correct permissions
 resource "aws_iam_role" "github_actions_role" {
   name_prefix = "github-actions-role-"
   assume_role_policy = jsonencode({
@@ -221,18 +222,28 @@ resource "aws_iam_role_policy" "github_actions_policy" {
   role = aws_iam_role.github_actions_role.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Action   = ["s3:PutObject", "s3:ListBucket"]
-      Effect   = "Allow"
-      Resource = [
-        aws_s3_bucket.app_bucket.arn,
-        "${aws_s3_bucket.app_bucket.arn}/*"
-      ]
-    }]
+    Statement = [
+      {
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Effect   = "Allow"
+        Resource = [
+          aws_s3_bucket.app_bucket.arn,
+          "${aws_s3_bucket.app_bucket.arn}/sources/*",
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/*"
+        ]
+      },
+      {
+        Action   = ["s3:PutObject"]
+        Effect   = "Allow"
+        Resource = [
+          "${aws_s3_bucket.app_bucket.arn}/artifacts/latest/*"
+        ]
+      }
+    ]
   })
 }
 
-# Elastic IP
+# Elastic IP (free when attached to running instance)
 resource "aws_eip" "web_eip" {
   domain = "vpc"
   tags = { Name = "webapp-eip" }
