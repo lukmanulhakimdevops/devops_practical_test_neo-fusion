@@ -39,17 +39,27 @@ jobs:
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/sources/SOURCE_TodoWebAPI.7z .
           7z x SOURCE_TodoWebAPI.7z -oextracted_source
 
-      - name: Build and Publish
-        working-directory: ./extracted_source
+      - name: Find project file
+        id: findproj
         run: |
-          dotnet restore
-          dotnet build  --no-restore --configuration Release
-          dotnet publish --no-build --configuration Release --output ./publish_output
+          PROJ_FILE=$(find extracted_source -name "*.csproj" | head -1)
+          if [ -z "$PROJ_FILE" ]; then
+            echo "No .csproj found"
+            exit 1
+          fi
+          echo "proj_path=$PROJ_FILE" >> $GITHUB_OUTPUT
+          echo "proj_dir=$(dirname "$PROJ_FILE")" >> $GITHUB_OUTPUT
+
+      - name: Build and Publish
+        run: |
+          dotnet restore "${{ steps.findproj.outputs.proj_path }}"
+          dotnet build "${{ steps.findproj.outputs.proj_path }}" --no-restore --configuration Release
+          dotnet publish "${{ steps.findproj.outputs.proj_path }}" --no-build --configuration Release --output ./publish_output
 
       - name: Package to 7z
         run: |
-          cd extracted_source/publish_output
-          7z a ../../webapp-binaries.7z *
+          cd publish_output
+          7z a ../webapp-binaries.7z *
 
       - name: Upload artifact to S3
         run: |

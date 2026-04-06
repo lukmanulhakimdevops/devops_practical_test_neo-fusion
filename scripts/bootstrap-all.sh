@@ -186,17 +186,27 @@ jobs:
           aws s3 cp s3://${{ secrets.S3_BUCKET }}/artifacts/sources/SOURCE_TodoWebAPI.7z .
           7z x SOURCE_TodoWebAPI.7z -oextracted_source
 
-      - name: Build and Publish
-        working-directory: ./extracted_source
+      - name: Find project file
+        id: findproj
         run: |
-          dotnet restore
-          dotnet build  --no-restore --configuration Release
-          dotnet publish --no-build --configuration Release --output ./publish_output
+          PROJ_FILE=$(find extracted_source -name "*.csproj" | head -1)
+          if [ -z "$PROJ_FILE" ]; then
+            echo "No .csproj found"
+            exit 1
+          fi
+          echo "proj_path=$PROJ_FILE" >> $GITHUB_OUTPUT
+          echo "proj_dir=$(dirname "$PROJ_FILE")" >> $GITHUB_OUTPUT
+
+      - name: Build and Publish
+        run: |
+          dotnet restore "${{ steps.findproj.outputs.proj_path }}"
+          dotnet build "${{ steps.findproj.outputs.proj_path }}" --no-restore --configuration Release
+          dotnet publish "${{ steps.findproj.outputs.proj_path }}" --no-build --configuration Release --output ./publish_output
 
       - name: Package to 7z
         run: |
-          cd extracted_source/publish_output
-          7z a ../../webapp-binaries.7z *
+          cd publish_output
+          7z a ../webapp-binaries.7z *
 
       - name: Upload artifact to S3
         run: |
@@ -650,7 +660,7 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
 BUCKET_NAME="${aws_s3_bucket.app_bucket.id}"
-# Wait for binary artifact (seed from bootstrap) up to 5 minutes
+# Wait for binary artifact (seed from bootstrap)
 for i in {1..30}; do
   if aws s3 ls "s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z" &>/dev/null; then
     aws s3 cp s3://$BUCKET_NAME/artifacts/binaries/webapp-binaries.7z /tmp/webapp.7z
@@ -877,26 +887,37 @@ upload_artifacts() {
     [ -z "$S3_BUCKET" ] && return
     echo "[S3] Uploading artifacts to s3://$S3_BUCKET..."
 
-    # Upload source code (required for CI/CD)
+    # Create source archive if not exists
+    if [ ! -f "artifacts/sources/SOURCE_TodoWebAPI.7z" ]; then
+        echo "[SOURCE] Creating source archive from current directory..."
+        mkdir -p artifacts/sources
+        PROJ_FILE=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+        if [ -z "$PROJ_FILE" ]; then
+            echo "[ERROR] No .csproj found. Cannot create source archive."
+            exit 1
+        fi
+        PROJ_DIR=$(dirname "$PROJ_FILE")
+        (cd "$PROJ_DIR" && 7z a -r -x!bin -x!obj -x!.git "../artifacts/sources/SOURCE_TodoWebAPI.7z" .)
+    fi
+
     if [ -f "artifacts/sources/SOURCE_TodoWebAPI.7z" ]; then
         echo "[UPLOAD] Source code archive"
         aws s3 cp "artifacts/sources/SOURCE_TodoWebAPI.7z" "s3://$S3_BUCKET/artifacts/sources/SOURCE_TodoWebAPI.7z"
-        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/sources/SOURCE_TodoWebAPI.7z" --acl bucket-owner-full-control || echo "ACL set failed"
+        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/sources/SOURCE_TodoWebAPI.7z" --acl bucket-owner-full-control || true
     else
-        echo "[ERROR] Source not found at artifacts/sources/SOURCE_TodoWebAPI.7z"
+        echo "[ERROR] Source archive not found."
         exit 1
     fi
 
-    # Upload pre-built binary (seed) if exists
+    # Upload pre-built binary if exists (seed)
     if [ -f "artifacts/binaries/Binary-linux-x64.7z" ]; then
         echo "[UPLOAD] Pre-built binary (seed)"
         aws s3 cp "artifacts/binaries/Binary-linux-x64.7z" "s3://$S3_BUCKET/artifacts/binaries/webapp-binaries.7z"
-        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/binaries/webapp-binaries.7z" --acl bucket-owner-full-control || echo "ACL set failed"
+        aws s3api put-object-acl --bucket "$S3_BUCKET" --key "artifacts/binaries/webapp-binaries.7z" --acl bucket-owner-full-control || true
     else
-        echo "[WARN] No pre-built binary found. CI/CD will build from source."
+        echo "[WARN] No pre-built binary. CI/CD will build from source."
     fi
 
-    # Upload SQL
     [ -f "artifacts/sql/TodoItem_DDL.sql" ] && aws s3 cp artifacts/sql/TodoItem_DDL.sql s3://$S3_BUCKET/sql/
     echo "[OK] Artifacts uploaded."
 }
